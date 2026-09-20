@@ -1,0 +1,12 @@
+.git
+.venv
+.env
+data
+artifacts
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+frontend/node_modules
+frontend/.next
+frontend/*.tsbuildinfo
