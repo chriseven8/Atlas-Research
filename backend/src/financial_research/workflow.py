@@ -43,7 +43,9 @@ State = TypedDict(
     total=False,
 )
 
-# 被计划跳过的节点仍要写出一份结构完整的输出：risk / report 会直接读这些键。
+# 被计划跳过的节点仍要写出一份结构完整的输出。下游读者目前都用 `or []` / `or {}` 兜底，
+# 所以这里少写几个键不会立刻变形；保留完整形状是为了让「跳过」与其它状态的输出同构，
+# 前端与 REST 消费者不必为跳过分支单独做存在性判断。
 SKIPPED_DEFAULTS = {
     "items": [],
     "claims": [],
@@ -719,7 +721,10 @@ class ResearchWorkflow:
     def node_report(self, state: State, name: str) -> dict:
         evs = self.evidence_pool(state)
         limitations: list[str] = []
-        for key in (*FINDING_AGENTS, *REVISION_NODES):
+        # risk 与 arbiter 同样会调用模型，它们的降级原因必须一并收进 limitations。
+        # 漏掉这两个键会让「风控的模型调用失败」表现为一份没有任何提示的 completed 报告：
+        # 确定性风控结论照常产出，只是模型那一层哑火，而报告对此只字不提。
+        for key in (*FINDING_AGENTS, "risk", "arbiter", *REVISION_NODES):
             for warning in (state.get(key) or {}).get("warnings") or []:
                 if warning not in limitations:
                     limitations.append(warning)
@@ -762,7 +767,7 @@ class ResearchWorkflow:
                 "AI 研判已校验结构和引用 ID，但未自动证明每个推断均被原文支持；请结合来源审阅。"
             )
 
-        witness = (*FINDING_AGENTS, *REVISION_NODES)
+        witness = (*FINDING_AGENTS, "risk", "arbiter", *REVISION_NODES)
         partial = ai_failed or any((state.get(key) or {}).get("status") == "partial" for key in witness)
 
         result = {
@@ -794,7 +799,6 @@ class ResearchWorkflow:
             "planner": (state.get("manager") or {}).get("planner", "规则规划器"),
             "plan": self.plan_of(state),
             "agent_findings": self.agent_findings(state),
-            "revisions": self.revision_records(state),
             "challenges": self.challenge_records(state),
             "arbitration": state.get("arbiter") or None,
             "engine": "多 Agent 协作 + AI 研判" if ai else "多 Agent 协作（确定性规则）",
@@ -817,18 +821,20 @@ class ResearchWorkflow:
                 findings[f"{key}{REVISION_SUFFIX}"] = finding
         return findings
 
-    def revision_records(self, state: State) -> dict:
-        return {name: state[name] for name in REVISION_NODES if state.get(name)}
-
     def challenge_records(self, state: State) -> list[dict]:
         records = []
         for source, round_no in (("risk", 1), (RISK_REVISION, 2)):
             output = state.get(source)
             if not output:
                 continue
+            # 回边只允许一轮：只有第一轮（risk）的质询会被执行。risk@1 的质询不再触发返工，
+            # 所以第二轮即便 target 的 @1 节点存在，那也是回应第一轮质询的产物，
+            # 据此把第二轮记成「已返工」就是在报告里写一句不成立的话。
+            triggers_rework = source == "risk"
             for challenge in output.get("challenges") or []:
                 target = challenge.get("target_agent")
                 accepted = target in REVISABLE
+                reworked = triggers_rework and bool(state.get(f"{target}{REVISION_SUFFIX}"))
                 records.append(
                     {
                         "target_agent": target,
@@ -836,7 +842,7 @@ class ResearchWorkflow:
                         "request": challenge.get("request", ""),
                         "round": round_no,
                         "accepted": accepted,
-                        "resolved": bool(accepted and state.get(f"{target}{REVISION_SUFFIX}")),
+                        "resolved": bool(accepted and reworked),
                     }
                 )
         return records

@@ -295,6 +295,49 @@ def test_challenge_triggers_rework_and_a_second_risk_round(repo, settings):
     assert "## 质询与返工" in result["report"]["markdown"]
     # 复审后风控收回了质询 → 不再有第二轮返工
     assert "news@1@1" not in agent_names(result)
+    # 模型产出的引用也必须落在报告真正渲染的证据池里，否则前端「点引用跳证据」是死链。
+    # 上面那条 claims 断言只覆盖 Python 构造的确定性结论；风险在于模型结论，
+    # 而 MockTransport 不校验引用，所以这里直接查 agent_findings。
+    report = result["report"]
+    pool = {e["id"] for e in report["evidence"]}
+    assert report["agent_findings"], "本用例启用了模型，应当留下各角色研判"
+    assert all(
+        set(claim["evidence_ids"]) <= pool
+        for finding in report["agent_findings"].values()
+        for claim in finding["findings"]
+    )
+
+
+def test_revision_cap_stops_a_rechallenging_risk(repo, settings):
+    """risk@1 再次质询也不会触发第二轮返工。
+
+    回边的唯一终止条件就是这一轮上限，但其它用例里的 risk 在复审轮都主动收回了质询，
+    于是把路由守卫整个删掉，测试套件依然全绿。这里让 risk 两轮都提质询，把上限钉住：
+    一旦 risk@1 能再次路由回 news@1，图只会靠 GraphRecursionError 停下来，
+    表现为任务失败，而不是「返工恰好只有一轮」。
+    """
+    enable_llm(settings)
+    journal = []
+    transport = role_transport(
+        overrides={
+            "risk": lambda context, ids: risk_payload(
+                ids, [{"target_agent": "news", "reason": "证据缺口", "request": "重新归纳"}]
+            )
+        },
+        journal=journal,
+    )
+    job_id, job = create_claim(repo, market="CN", symbol="600519", mode="live", use_llm=True)
+    execute_job(repo, settings, job, CnProvider(), transport=transport)
+    result = repo.get(job_id)
+    assert result["status"] in {"completed", "partial"}, result["error"]
+    # news 只返工一次、risk 只复审一次
+    assert journal.count("news") == 2
+    assert journal.count("risk") == 2
+    assert "news@1@1" not in agent_names(result)
+    # 第二轮质询确实被提出来了，但它没有得到任何返工 → 不能记成「已返工」
+    challenges = result["report"]["challenges"]
+    assert [c["round"] for c in challenges] == [1, 2]
+    assert [c["resolved"] for c in challenges] == [True, False]
 
 
 def test_rerun_reuses_plan_and_does_not_reenter_the_revision_loop(repo, settings):
