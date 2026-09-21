@@ -206,6 +206,14 @@ class Arbitration(BaseModel):         # arbiter 裁决
 `normalize_plan` 是模型输出与内部表示之间的边界：它把列表形的契约转成按角色索引的 dict，
 供报告渲染与前端按键查找；`planner.py` 的规则规划器产出同一列表形状，两条路径共用一套语义。
 
+它的**前置条件是类型已经过了校验**（入参只来自 `ResearchPlan.model_dump()` 或 `rule_plan`），
+所以它只负责挡住**取值**层面的不可信输入——角色名不存在、或试图关闭常驻角色。
+类型防御由 pydantic 在 `call_agent` 里完成，这里不重复做。
+
+`skipped_reason` 的键**统一用角色 key**（`market`、`macro`……），未知角色用模型原样返回的
+字符串，**不混入中文角色名**。中文名只由 `AGENT_NAMES` 在展示层映射。混用会让下游无法按键
+查找：key → 显示名是函数关系，显示名 → key 不是，且会随文案改动而漂移。
+
 **这类错误不会被单测拦住**——`MockTransport` 不校验 schema，模型调用全绿而线上全 400。
 因此 `test_agents.py` 里有一条结构性守卫测试，遍历 `AGENT_SPECS` 断言每个 schema 满足上述两条要求。
 验收时还会拿真实 schema 打一次线上接口逐个确认 200。

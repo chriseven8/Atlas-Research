@@ -5,7 +5,7 @@ use_llm=False 时由它生成研究计划；use_llm=True 时它是模型规划�
 的 LLM 契约一致），再由 normalize_plan 统一规范化，避免两套规划语义漂移。
 """
 
-from .agents import AGENT_NAMES, PLANNABLE_AGENTS
+from .agents import AGENT_KEYS, PLANNABLE_AGENTS
 from .domain import ResearchRequest
 from .settings import Settings
 
@@ -50,13 +50,19 @@ def rule_plan(req: ResearchRequest, settings: Settings) -> dict:
 
 
 def normalize_plan(plan: dict) -> dict:
-    """把任意来源（模型或规则）的计划规范成可安全执行的形状。
+    """把模型或规则产出的计划规范成可安全执行的形状。
 
     入参是列表形的 LLM 契约（focus / skipped_reason 为 [{"agent": ..., "note": ...}]），
     出参改成按角色索引的 dict，便于报告渲染与前端按键查找。
 
+    前置条件：入参必须是 `ResearchPlan.model_dump()` 或 `rule_plan` 的产物。模型路径已由
+    `call_agent` 用 pydantic 校验过类型，这里只处理**取值**不可信（角色名不存在、试图关闭
+    常驻角色），不重复做类型防御。
+
     模型可能返回不存在的角色名，或试图关闭 market/technical/risk/report 这类常驻角色。
     这里一律过滤，并把被拒绝的项写进 skipped_reason，保证下游的启用判定只面对受控取值。
+    skipped_reason 的键统一用角色 key（未知角色用模型原样返回的字符串），
+    不混入中文角色名——中文名只由 `AGENT_NAMES` 在展示层映射，混用会让下游无法按键查找。
     """
     raw = list(plan.get("enabled_agents") or [])
     enabled = [key for key in PLANNABLE_AGENTS if key in raw]
@@ -68,8 +74,8 @@ def normalize_plan(plan: dict) -> dict:
     for key in raw:
         if key in PLANNABLE_AGENTS:
             continue
-        if key in AGENT_NAMES:
-            skipped[AGENT_NAMES[key]] = "该角色不可由计划启停，本轮按常驻规则处理。"
+        if key in AGENT_KEYS:
+            skipped[key] = "该角色不可由计划启停，本轮按常驻规则处理。"
         else:
             skipped[key] = "计划请求了未定义的角色，已忽略。"
     return {
