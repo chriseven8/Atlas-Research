@@ -4,9 +4,10 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from .agents import AGENT_SPECS
 from .analytics import analyze
 from .domain import LeaseLost, ProviderError, ResearchRequest, utcnow
-from .llm import synthesize
+from .llm import call_agent
 from .providers import provider_for
 from .settings import Settings
 from .storage import Repository
@@ -279,8 +280,9 @@ class ResearchWorkflow:
             call_id = self.repo.reserve_call(self.job["id"], self.job["owner"])
             if call_id:
                 try:
-                    ai, usage = synthesize(
+                    ai, usage = call_agent(
                         self.settings,
+                        AGENT_SPECS["report"],
                         {
                             "question": self.req.question,
                             "mode": self.req.mode,
