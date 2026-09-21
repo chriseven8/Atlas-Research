@@ -118,9 +118,59 @@ class Synthesis(BaseModel):
     uncertainties: list[str]
 
 
+class ResearchPlan(BaseModel):
+    """Manager 产出的研究计划，决定本轮启用哪些可选角色。"""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled_agents: list[str]
+    rationale: str
+    focus: dict[str, str] = Field(default_factory=dict)
+    skipped_reason: dict[str, str] = Field(default_factory=dict)
+
+
+class AgentFinding(BaseModel):
+    """所有研究型 agent 的统一输出契约。"""
+
+    model_config = ConfigDict(extra="forbid")
+    headline: str
+    findings: list[Claim]
+    confidence: Literal["high", "medium", "low"]
+    open_questions: list[str] = Field(default_factory=list)
+
+
+class Challenge(BaseModel):
+    """风控角色对其他 agent 提出的返工要求。"""
+
+    model_config = ConfigDict(extra="forbid")
+    target_agent: str
+    reason: str
+    request: str
+
+
+class RiskReview(AgentFinding):
+    """风控输出：在通用 finding 之上附加可执行的返工要求。"""
+
+    model_config = ConfigDict(extra="forbid")
+    challenges: list[Challenge] = Field(default_factory=list)
+
+
+class Arbitration(BaseModel):
+    """仲裁角色对冲突结论的裁决。"""
+
+    model_config = ConfigDict(extra="forbid")
+    conflict: str
+    ruling: str
+    rationale: str
+    evidence_ids: list[str]
+
+
 class ProviderError(RuntimeError):
     """Public-safe provider error: never contains credentials or request URLs."""
 
 
 class LeaseLost(RuntimeError):
     pass
+
+
+class OutputTruncated(ProviderError):
+    """模型输出被 max_output_tokens 截断，需要与请求失败区分开。"""
