@@ -27,4 +27,4 @@
 .challenge-state.ok{background:var(--green);color:#fff}
 .challenge-state.open{background:var(--amber);color:#fff}
 .challenge-item p{margin:6px 0 0;font-size:13px;line-height:1.6}
-.skip-reason{margin:6px 0 0;font-size:8px;color:var(--muted);line-height:1.5}
+.agent-card p.skip-reason{color:var(--muted)}
