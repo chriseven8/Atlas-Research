@@ -9,7 +9,7 @@ from .workflow import ResearchWorkflow, public_error
 log = logging.getLogger("research.worker")
 
 
-def execute_job(repo: Repository, settings: Settings, job: dict, provider=None):
+def execute_job(repo: Repository, settings: Settings, job: dict, provider=None, transport=None):
     stop = threading.Event()
 
     def renew():
@@ -24,7 +24,7 @@ def execute_job(repo: Repository, settings: Settings, job: dict, provider=None):
     heartbeat = threading.Thread(target=renew, daemon=True)
     heartbeat.start()
     try:
-        result = ResearchWorkflow(settings, repo, job, provider=provider).run()
+        result = ResearchWorkflow(settings, repo, job, provider=provider, transport=transport).run()
         repo.finish(job["id"], job["owner"], result["report"]["status"])
     except LeaseLost:
         log.info("Job %s no longer owned by this worker", job["id"])
