@@ -80,14 +80,17 @@ class AgentSpec:
 
 ## 4. 图结构
 
+`technical` 只由 `market` 触发，**不能**再补一条 `manager -> technical`：langgraph 的独立
+`add_edge(manager, X)` 不会构成汇合屏障，多一条边会让 `technical` 与 `market` 同批执行，
+从而读不到行情。见 `workflow.py` 中建图处的注释。
+
 ```mermaid
 flowchart LR
   START([START]) --> manager[研究经理]
   manager --> market[市场数据]
-  manager --> technical[技术分析]
   manager --> news[事件分析]
   manager --> macro[宏观分析]
-  market --> technical
+  market --> technical[技术分析]
   technical --> risk[风控审查]
   news --> risk
   macro --> risk
