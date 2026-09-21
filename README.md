@@ -132,6 +132,21 @@ npm run build
 
 生产构建后可用 `npm run start`；`BACKEND_URL` 是构建时配置，改变后端地址时需重新构建。
 
+### `frontend/next-env.d.ts` 的本地噪音
+
+这个文件由 Next.js 自动生成，`next dev` 与 `next build` 会让它把内部的类型引用在
+`.next/dev/types/` 与 `.next/types/` 之间来回切换，于是几乎每跑一次都显示为「已修改」。
+
+它**必须留在版本库里**：`tsc` 依赖它引入的 Next 全局类型（图片导入、typed routes）。
+取消跟踪后 `npm run typecheck` 仍然会通过，但检查范围会静默变窄——比噪音本身更糟。
+因此改用 `git update-index --skip-worktree` 屏蔽本地改动，文件本身照常提交。
+
+**这个标记只存在本机 git index 里，不随仓库同步。换电脑或重新克隆后需要再设一次：**
+
+```sh
+git update-index --skip-worktree frontend/next-env.d.ts
+```
+
 ## Docker + PostgreSQL
 
 安装 Docker Desktop 后，在项目根目录运行：
