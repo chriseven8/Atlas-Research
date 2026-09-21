@@ -8,6 +8,8 @@ data/
 *.egg-info/
 node_modules/
 .next/
+# IDE 本地配置，与项目无关
+.idea/
 out/
 *.tsbuildinfo
 artifacts/
