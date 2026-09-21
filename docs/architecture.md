@@ -4,34 +4,49 @@
 
 系统为本地单用户、A 股/美股日线市场研究系统。前端默认 A 股真实日线，腾讯公共行情无需密钥；模型单独启用。API 省略 market 时保留 US 以兼容旧任务。所有界面、持久化记录、报告都保留数据模式。
 
-固定七角色图：
+条件路由多 Agent 图（八个常驻节点）：
 
 ```mermaid
 flowchart LR
-  manager[研究经理] --> market[市场数据]
-  manager --> news[新闻事件]
-  manager --> macro[宏观研究]
+  START([START]) --> manager[研究经理]
+  manager --> market[市场数据]
+  manager --> news[事件分析]
+  manager --> macro[宏观分析]
   market --> technical[技术分析]
-  technical --> risk[风险审查]
+  technical --> risk[风控审查]
   news --> risk
   macro --> risk
-  risk --> report[报告生成]
+  risk -.质询.-> technical1["技术分析@1"]
+  risk -.质询.-> news1["事件分析@1"]
+  risk -.质询.-> macro1["宏观分析@1"]
+  technical1 --> risk1["风控审查@1"]
+  news1 --> risk1
+  macro1 --> risk1
+  risk --> arbiter[首席仲裁]
+  risk1 --> arbiter
+  risk --> report[报告撰写]
+  risk1 --> report
+  arbiter --> report
+  report --> END([END])
 ```
 
-Manager 制定固定范围的计划；Market 获取标准化日线；Technical 用 Python 计算；News 去重及时间过滤；Macro 解释有限利率背景；Risk 检测跳价、样本不足、动量极端、覆盖缺口及新闻情绪/趋势分歧；Report 汇总并按需进行一次 LLM 综合。
+Manager 制定研究计划，决定可选角色（事件分析、宏观分析）是否启用并记录停用原因；Market 获取标准化日线；Technical 用 Python 计算；News 去重及时间过滤；Macro 解释有限利率背景；Risk 检测跳价、样本不足、动量极端、覆盖缺口及新闻情绪/趋势分歧，并可质询返工；Arbiter 在方向冲突时裁决；Report 汇总。
 
-当前图没有自主工具探索、任意循环或自动补充研究。这样可以明确调用范围和费用，后续可添加有上限的复审分支。
+图中的回边是**有上限的循环**：被质询的角色最多复审一轮，轮次由节点名 `@1` 后缀表达。
+系统不做自主工具调用（ReAct）：取数与校验始终是确定性代码，模型只对已校验的数据做推理与判断。
+八个节点始终存在于图中，被计划排除的节点立即返回 `status: "skipped"` 与原因，不执行取数或模型调用——这是为了避免 `[technical, news, macro] -> risk` 汇合屏障在动态删边时死锁。动态性由质询回边提供；研究范围与取数清单仍由请求参数和计划决定。
 
 ## 通信与持久化
 
 - LangGraph `StateGraph` 使用独立状态字段传递各角色输出，避免并发写同一个消息数组。
 - `market -> technical` 是依赖链，`[technical, news, macro] -> risk` 为显式汇合屏障。
+- `risk` / `risk@1` 使用条件边：有质询时路由到对应 `@1` 返工节点，检测到方向冲突时路由到 `arbiter`，否则进入 `report`。返工节点回到 `risk@1`，构成上限一轮的环。
 - `research_jobs` 保存请求、状态、租约、执行次数、调用预算。
 - `agent_runs` 以 `(job_id, name)` 为主键保存节点状态、结果和时间。
 - `research_events` 保存状态事件；`model_calls` 保存调用预留与成功用量。
 - 标准化行情、新闻、宏观与证据快照保存在 JSON 输出内，规模最多 100 条日线/12 条新闻。
 
-**本版本采用应用层持久化节点结果，不是 LangGraph 原生 checkpointer。** 进程恢复后重新进入固定图，包装器读取已完成节点并跳过外部调用，复用同一请求的数据。运行到一半的节点会重新执行；外部服务仍属于至少一次执行，不能承诺网络请求严格只发生一次。模型调用先持久化预留预算，可以限制中断后的重复计费风险。
+**本版本采用应用层持久化节点结果，不是 LangGraph 原生 checkpointer。** 进程恢复后重新进入同一张图，包装器按 `(job_id, name)` 读取已完成节点并跳过外部调用，复用同一请求的数据。运行到一半的节点会重新执行；外部服务仍属于至少一次执行，不能承诺网络请求严格只发生一次。模型调用先持久化预留预算，可以限制中断后的重复计费风险。
 
 ## 任务生命周期
 
@@ -47,11 +62,11 @@ API 创建任务后立即返回 202。Worker 通过条件 UPDATE 原子领取，
 
 行情失败：整个任务失败，不编造价格。新闻/宏观 ProviderError：对应节点 partial，保留缺失原因，继续产出受限报告。模型 HTTP、拒绝、输出截断或引用校验失败：不展示其内容，输出规则报告并记录限制。
 
-业务任务不自动重试不可用数据，以避免耗尽 Alpha Vantage 配额。恢复是处理进程中断，不是无限调用上游。模型预算默认 1 次，输出上限默认 2400 tokens；金额是基于用户配置单价的估算。
+业务任务不自动重试不可用数据，以避免耗尽 Alpha Vantage 配额。恢复是处理进程中断，不是无限调用上游。模型预算默认每任务 12 次调用，单次输出上限默认 4000 tokens；金额是基于用户配置单价的估算。
 
 ## 技术取舍
 
-- FastAPI + SQLAlchemy Core，避免为七个角色拆微服务。
+- FastAPI + SQLAlchemy Core，避免为八个角色拆微服务。
 - LangGraph 管理执行关系；LangChain Core 仅用于模型提示模板。
 - SQLite 默认便于直接运行，PostgreSQL 使用相同仓储接口。
 - Redis 暂不引入；任务已持久化于数据库，不需要额外 Broker。
