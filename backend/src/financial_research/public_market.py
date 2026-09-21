@@ -123,5 +123,7 @@ class PublicMarketProvider:
 
     def macro(self, req: ResearchRequest) -> dict:
         if req.market == "CN":
-            raise ProviderError("中国宏观数据源尚未接入；不以美国利率替代中国宏观背景。")
+            from .china_macro import fetch_china_macro
+
+            return fetch_china_macro(req, self.settings, self.transport)
         return AlphaVantageProvider(self.settings, self.transport).macro(req)

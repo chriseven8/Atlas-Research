@@ -35,11 +35,20 @@ def rule_plan(req: ResearchRequest, settings: Settings) -> dict:
     else:
         skipped.append(("news", "未配置美国新闻源（ALPHA_VANTAGE_API_KEY），本轮新闻证据不可用。"))
 
-    if req.market == "US" and settings.alpha_vantage_api_key:
+    if req.market == "CN":
+        # 中国 10 年期国债收益率走东方财富公开接口，无需密钥，因此 A 股宏观总能启用。
+        enabled.append("macro")
+        focus.append(
+            (
+                "macro",
+                "说明 10 年期国债收益率这一长期无风险利率如何经折现率影响估值，并标注它不含货币政策与通胀预期。",
+            )
+        )
+    elif settings.alpha_vantage_api_key:
         enabled.append("macro")
         focus.append(("macro", "说明当前利率环境通过融资成本与折现率影响估值的传导路径及其局限。"))
     else:
-        skipped.append(("macro", "中国宏观数据源尚未接入，本轮不启用宏观角色。"))
+        skipped.append(("macro", "未配置美国宏观数据源（ALPHA_VANTAGE_API_KEY），本轮宏观角色不可用。"))
 
     return {
         "enabled_agents": enabled,

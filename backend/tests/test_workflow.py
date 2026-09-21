@@ -196,11 +196,24 @@ def test_complete_pipeline_and_evidence_integrity(repo, settings, symbol, lookba
     assert set(AGENT_KEYS) <= set(statuses)
     for key in ("manager", "market", "technical", "risk", "report"):
         assert statuses[key] == "completed"
-    # 演示模式且未配置美国新闻源 → 规则规划器停用新闻与宏观；无方向冲突 → 不启用仲裁
+    # 演示模式且未配置美国新闻源 → 规则规划器停用新闻与宏观
     assert statuses["news"] == "skipped"
     assert statuses["macro"] == "skipped"
-    assert statuses["arbiter"] == "skipped"
     report = result["report"]
+    # 仲裁只由确定性背离触发，而演示序列里哪只标的会背离取决于合成本身
+    # （MSFT 60 条就是均线下行 + RSI14 18.07 超卖），所以这里断言的是不变量：
+    # 要么没背离而跳过，要么裁决措辞与本轮真正命中的那条判据一致。
+    assert statuses["arbiter"] in {"skipped", "completed"}
+    arbitration = report["arbitration"]
+    if statuses["arbiter"] == "completed":
+        # 演示新闻没有情绪标签，能命中的只可能是均线/RSI 那条判据；
+        # 裁决必须跟着它走，不能套用情绪分歧那句「以价格为主证据」。
+        assert "均线排列" in arbitration["conflict"]
+        assert "趋势排列" in arbitration["ruling"]
+        assert "一手观测" not in arbitration["ruling"]
+    else:
+        assert arbitration["ruling"] == ""
+        assert arbitration["conflict"] == ""
     assert len(report["chart"]) == lookback
     assert report["mode"] == "demo" and "合成" in report["summary"]
     assert all(e["is_demo"] for e in report["evidence"])
@@ -237,9 +250,11 @@ def test_plan_disabled_run_makes_no_model_calls(repo, settings):
     assert result["llm_calls"] == 0
     statuses = agent_statuses(result)
     assert statuses["news"] == "completed"
-    assert statuses["macro"] == "skipped"
+    # A 股两个可选角色都无需密钥，规则规划器一律启用；关键是在 use_llm=False 下
+    # 它们跑了，却一次模型都没调——确定性取数与模型研判是分开的两件事。
+    assert statuses["macro"] == "completed"
     assert result["report"]["planner"] == "规则规划器"
-    assert result["report"]["plan"]["enabled_agents"] == ["news"]
+    assert result["report"]["plan"]["enabled_agents"] == ["news", "macro"]
 
 
 def test_model_plan_skips_unlisted_agent_and_records_reason(repo, settings):
@@ -393,6 +408,53 @@ def test_conflict_detection_requires_opposite_directions(repo, settings):
         workflow.detected_conflicts({"technical": {"metrics": {"trend": "震荡"}}, "news": {"items": []}})
         == []
     )
+
+
+def arbiter_workflow(settings, repo, metrics, items=()):
+    workflow = ResearchWorkflow(settings, repo, {"request": ResearchRequest().model_dump(mode="json")})
+    return workflow, {"technical": {"metrics": metrics}, "news": {"items": list(items)}}
+
+
+@pytest.mark.parametrize(
+    "trend,rsi,fires",
+    [
+        ("上行", 70.0, True),
+        ("下行", 30.0, True),
+        ("上行", 69.99, False),
+        ("下行", 30.01, False),
+        # 均线本身没排出方向就谈不上「排列与 RSI 背离」
+        ("震荡", 95.0, False),
+        # SMA50 未成形时 trend 是震荡、RSI 照样算得出来，不能据此判背离
+        ("上行", None, False),
+    ],
+)
+def test_momentum_divergence_needs_a_trend_and_an_extreme_rsi(settings, repo, trend, rsi, fires):
+    workflow, state = arbiter_workflow(settings, repo, {"trend": trend, "rsi14": rsi})
+    assert [f["kind"] for f in workflow.conflict_findings(state)] == (["momentum"] if fires else [])
+
+
+def test_momentum_divergence_fires_without_news_or_a_model(settings, repo):
+    """A 股与演示模式的新闻没有情绪标签，仲裁只能靠这条价内判据才跑得起来。"""
+    workflow, state = arbiter_workflow(settings, repo, {"trend": "下行", "rsi14": 12.0}, items=[])
+    assert workflow.detected_conflicts(state), "无新闻时也必须能识别背离"
+    assert workflow.node_arbiter(state, "arbiter")["status"] == "completed"
+
+
+def test_arbiter_ruling_wording_follows_the_conflict_kinds(settings, repo):
+    momentum, state = arbiter_workflow(settings, repo, {"trend": "上行", "rsi14": 78.0})
+    ruling = momentum.node_arbiter(state, "arbiter")["ruling"]
+    assert "趋势排列" in ruling
+    # 均线/RSI 两边都源自同一段价格，「价格是一手观测」那句在这里不成立
+    assert "一手观测" not in ruling
+
+    both, mixed = arbiter_workflow(
+        settings, repo, {"trend": "下行", "rsi14": 12.0}, items=[{"sentiment": "Bullish"}]
+    )
+    assert {f["kind"] for f in both.conflict_findings(mixed)} == {"sentiment", "momentum"}
+    out = both.node_arbiter(mixed, "arbiter")
+    assert "供应商情绪标签仅作背景参考" in out["ruling"] and "趋势排列" in out["ruling"]
+    # 两类冲突各自的理由都要出现在同一条裁决里，而不是只留最后算出来的那一类
+    assert "直接观测" in out["rationale"] and "均值回归" in out["rationale"]
 
 
 def test_revision_round_cap_is_expressed_by_node_names():

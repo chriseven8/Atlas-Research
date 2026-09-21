@@ -23,6 +23,11 @@ FINDING_AGENTS = ("market", "technical", "news", "macro")
 REVISION_NODES = tuple(f"{key}{REVISION_SUFFIX}" for key in REVISABLE)
 RISK_REVISION = f"risk{REVISION_SUFFIX}"
 
+# RSI 的超买/超卖阈值。故意不写成可配置项：它们是「超买/超卖」这个说法本身的定义，
+# 改了就只是在改措辞，而判据本身没有变的余地。
+RSI_OVERBOUGHT = 70.0
+RSI_OVERSOLD = 30.0
+
 State = TypedDict(
     "State",
     {
@@ -241,7 +246,7 @@ class ResearchWorkflow:
                 "news_us": "Alpha Vantage 新闻情绪"
                 if self.settings.alpha_vantage_api_key
                 else "未配置，美国新闻不可用",
-                "macro_cn": "未接入，中国宏观不可用",
+                "macro_cn": "中国 10 年期国债到期收益率（东方财富，无需密钥）",
                 "macro_us": "Alpha Vantage / FRED 联邦基金利率"
                 if self.settings.alpha_vantage_api_key
                 else "未配置，美国宏观不可用",
@@ -333,21 +338,50 @@ class ResearchWorkflow:
             "warnings": output.get("warnings", []),
         }
 
-    def detected_conflicts(self, state: State) -> list[str]:
-        """确定性冲突检测：供应商情绪标签与价格趋势方向相反。
+    def conflict_findings(self, state: State) -> list[dict]:
+        """确定性冲突检测，返回带 kind 的结构化结果。
 
-        它不依赖模型，因此 use_llm=False 时 arbiter 依然能被触发。
+        两条判据都只读程序算出来的值，因此 use_llm=False 时 arbiter 依然能被触发。
+
+        第二条（均线排列 vs RSI）是为了让 A 股与演示模式也能触发仲裁：供应商情绪标签
+        只有 Alpha Vantage 的美股新闻才有，中文新闻一律是 None，只留第一条的话
+        仲裁在 A 股下永远不会运行，八个角色里就有一个是常驻不动的。
         """
         metrics = (state.get("technical") or {}).get("metrics") or {}
         trend = metrics.get("trend")
+        findings = []
         labels = [
             str(item.get("sentiment", "")).lower() for item in (state.get("news") or {}).get("items") or []
         ]
         if (trend == "下行" and any("bullish" in x for x in labels)) or (
             trend == "上行" and any("bearish" in x for x in labels)
         ):
-            return ["供应商新闻情绪与价格趋势存在方向分歧；事件窗口和价格窗口不同，不能据此判定任一方错误。"]
-        return []
+            findings.append(
+                {
+                    "kind": "sentiment",
+                    "detail": "供应商新闻情绪与价格趋势存在方向分歧；事件窗口和价格窗口不同，不能据此判定任一方错误。",
+                }
+            )
+        rsi = metrics.get("rsi14")
+        if isinstance(rsi, (int, float)):
+            if trend == "上行" and rsi >= RSI_OVERBOUGHT:
+                findings.append(
+                    {
+                        "kind": "momentum",
+                        "detail": f"均线排列显示上行（收盘价高于 SMA20 与 SMA50），但 RSI14 已达 {rsi:.2f} 的超买区；趋势跟随与均值回归两种读法方向相反。",
+                    }
+                )
+            elif trend == "下行" and rsi <= RSI_OVERSOLD:
+                findings.append(
+                    {
+                        "kind": "momentum",
+                        "detail": f"均线排列显示下行（收盘价低于 SMA20 与 SMA50），但 RSI14 已到 {rsi:.2f} 的超卖区；趋势跟随与均值回归两种读法方向相反。",
+                    }
+                )
+        return findings
+
+    def detected_conflicts(self, state: State) -> list[str]:
+        return [item["detail"] for item in self.conflict_findings(state)]
 
     def risk_context(self, state: State) -> dict:
         digests = {key: self.agent_digest(state, key) for key in FINDING_AGENTS}
@@ -643,27 +677,44 @@ class ResearchWorkflow:
         return output
 
     def node_arbiter(self, state: State, name: str) -> dict:
-        conflicts = self.latest_conflicts(state)
+        # 只认程序算出来的冲突，不读 risk 节点存下来的那份：返工节点（technical@1 等）
+        # 原样沿用上一轮的 metrics，因此这里重算与风控当初看到的是同一组判据，
+        # 而带 kind 的结构化结果才能让裁决措辞跟着冲突种类走。
+        findings = self.conflict_findings(state)
+        conflicts = [item["detail"] for item in findings]
         if not conflicts:
             return {
                 **SKIPPED_DEFAULTS,
                 "status": "skipped",
                 "agent": "arbiter",
                 "summary": "本轮未检测到结论冲突，无需仲裁。",
-                "reason": "技术面趋势与新闻情绪方向一致，或新闻证据本轮未启用。",
+                "reason": "价格趋势与供应商新闻情绪方向一致，且均线排列与 RSI 未见背离。",
                 "conflict": "",
                 "ruling": "",
                 "rationale": "",
                 "evidence_ids": [],
             }
         evidence = self.evidence_pool(state)
+        # 裁决措辞必须跟着冲突种类走：情绪分歧可以「以价格为主证据」，
+        # 但均线/RSI 分歧的两边都是价格算出来的，照搬那句话就是一句不成立的话。
+        kinds = {item["kind"] for item in findings}
+        rulings, rationales = [], []
+        if "sentiment" in kinds:
+            rulings.append("供应商情绪标签仅作背景参考")
+            rationales.append("价格是市场参与者行为的直接观测，情绪标签是对文本的二手聚合，未经原文核验")
+        if "momentum" in kinds:
+            rulings.append("均线排列与 RSI 冲突时以趋势排列为主，RSI 只用于判断当前价格在样本区间中的位置")
+            rationales.append(
+                "SMA20/50 是趋势跟随读法、RSI14 是均值回归读法，同一段价格序列上两者本就会给出相反信号，"
+                "分歧本身说明样本期内的方向并不确定"
+            )
         deterministic = {
             "status": "completed",
             "agent": "arbiter",
             "summary": f"检测到 {len(conflicts)} 项方向分歧，已给出裁决。",
             "conflict": " ".join(conflicts),
-            "ruling": "以价格与成交数据为主证据，供应商情绪标签仅作背景参考。",
-            "rationale": "价格是市场参与者行为的直接观测；情绪标签是对文本的二手聚合，未经原文核验。",
+            "ruling": "；".join(rulings) + "。",
+            "rationale": "；".join(rationales) + "。",
             "evidence_ids": [item["id"] for item in evidence[:3]],
         }
         output = self.run_agent("arbiter", self.arbiter_context(state, conflicts), deterministic)
@@ -673,13 +724,6 @@ class ResearchWorkflow:
                 if finding.get(field):
                     output[field] = finding[field]
         return output
-
-    def latest_conflicts(self, state: State) -> list[str]:
-        for key in (RISK_REVISION, "risk"):
-            conflicts = (state.get(key) or {}).get("conflicts")
-            if conflicts:
-                return list(conflicts)
-        return self.detected_conflicts(state)
 
     def node_revision(self, state: State, name: str) -> dict:
         """复审节点 technical@1 / news@1 / macro@1：在风控质询下重新研判。

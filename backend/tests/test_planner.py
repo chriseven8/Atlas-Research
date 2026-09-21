@@ -7,12 +7,13 @@ def make_req(**kwargs):
     return ResearchRequest(as_of="2026-06-10", **kwargs)
 
 
-def test_cn_plan_enables_news_but_not_macro(settings):
+def test_cn_plan_enables_news_and_macro_without_any_key(settings):
+    """两个 A 股可选角色都走东方财富公开接口，因此不该因为缺密钥被停用。"""
     plan = rule_plan(make_req(market="CN", symbol="600519", mode="live"), settings)
-    assert plan["enabled_agents"] == ["news"]
-    assert {item["agent"] for item in plan["focus"]} == {"news"}
+    assert plan["enabled_agents"] == ["news", "macro"]
+    assert {item["agent"] for item in plan["focus"]} == {"news", "macro"}
     assert all(item["note"] for item in plan["focus"])
-    assert {item["agent"] for item in plan["skipped_reason"]} == {"macro"}
+    assert plan["skipped_reason"] == []
 
 
 def test_us_plan_without_data_sources_skips_both_optional_agents(settings):

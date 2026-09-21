@@ -116,5 +116,10 @@ def test_cn_full_workflow_preserves_currency_and_missing_feeds(repo, settings):
     assert "CNY" in report["claims"][0]["text"]
     assert "USD" not in report["claims"][0]["text"]
     assert report["news"] == []
-    assert "中国宏观" in " ".join(report["limitations"])
+    # 新闻与宏观都被计划启用（A 股两个源都无需密钥），但本用例的上游全部 503：
+    # 报告必须如实标记为部分完成并说明是哪一路失败，而不是回退到 4.25% 的演示利率。
+    limitations = " ".join(report["limitations"])
+    assert "中国利率数据源" in limitations
+    assert report["macro"]["items"] == [] and report["coverage"]["macro"] is False
+    assert "4.25" not in limitations
     assert all(not e["is_demo"] for e in report["evidence"])
