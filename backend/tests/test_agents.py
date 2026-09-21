@@ -141,6 +141,16 @@ def test_only_data_source_backed_agents_are_plannable():
     assert set(PLANNABLE_AGENTS) <= set(OPTIONAL_AGENTS)
 
 
+def test_manager_prompt_enumerates_the_roster_by_name():
+    # manager 的 description 里逐个手写了角色名，模型据此决定启用谁。这段文字一旦与
+    # PLANNABLE_AGENTS / CORE_AGENTS 脱节（改名、增删角色），模型就会按错误的名单规划，
+    # 而 MockTransport 不校验语义，测试不会报错——所以在这里把两者绑在一起。
+    description = AGENT_SPECS["manager"].description
+    # manager 自己不是被规划的角色，不需要在描述里点名。
+    for key in [*PLANNABLE_AGENTS, *(key for key in CORE_AGENTS if key != "manager")]:
+        assert key in description, f"manager 的 description 未提及角色 {key}"
+
+
 def test_every_spec_has_a_role_prompt():
     for key, spec in AGENT_SPECS.items():
         assert spec.key == key
