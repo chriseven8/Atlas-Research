@@ -1,6 +1,15 @@
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from financial_research.agents import (
+    AGENT_KEYS,
+    AGENT_NAMES,
+    AGENT_SPECS,
+    CORE_AGENTS,
+    INJECTION_GUARD,
+    OPTIONAL_AGENTS,
+    PLANNABLE_AGENTS,
+)
 from financial_research.domain import (
     AgentFinding,
     Arbitration,
@@ -98,3 +107,80 @@ def test_agent_finding_requires_open_questions():
 def test_risk_review_requires_challenges():
     with pytest.raises(ValidationError):
         RiskReview(headline="x", findings=[], confidence="high", open_questions=[])
+
+
+def test_agent_roster_is_complete_and_ordered():
+    assert AGENT_KEYS == [
+        "manager",
+        "market",
+        "technical",
+        "news",
+        "macro",
+        "risk",
+        "arbiter",
+        "report",
+    ]
+    assert set(AGENT_SPECS) == set(AGENT_KEYS)
+    assert set(AGENT_NAMES) == set(AGENT_KEYS)
+
+
+def test_core_and_optional_split():
+    # market / technical 是取数与指标层，risk / report 是汇合层；缺一则整条流水线不成立。
+    assert set(CORE_AGENTS) == {"manager", "market", "technical", "risk", "report"}
+    assert set(OPTIONAL_AGENTS) == {"news", "macro", "arbiter"}
+    assert set(CORE_AGENTS) | set(OPTIONAL_AGENTS) == set(AGENT_KEYS)
+    for key in CORE_AGENTS:
+        assert AGENT_SPECS[key].optional is False
+    for key in OPTIONAL_AGENTS:
+        assert AGENT_SPECS[key].optional is True
+
+
+def test_only_data_source_backed_agents_are_plannable():
+    # arbiter 由冲突信号触发而非计划触发，因此不在 plannable 集合内。
+    assert PLANNABLE_AGENTS == ["news", "macro"]
+    assert set(PLANNABLE_AGENTS) <= set(OPTIONAL_AGENTS)
+
+
+def test_every_spec_has_a_role_prompt():
+    for key, spec in AGENT_SPECS.items():
+        assert spec.key == key
+        assert spec.role.strip(), f"{key} 缺少角色名"
+        assert len(spec.description.strip()) >= 20, f"{key} 的 description 太短，不足以作为 system prompt"
+        assert issubclass(spec.schema, BaseModel)
+
+
+def strict_problems(node, path="schema"):
+    """递归检查一份 JSON schema 是否满足 strict 模式的要求。"""
+    problems = []
+    if not isinstance(node, dict):
+        return problems
+    if node.get("type") == "object" or "properties" in node:
+        props = node.get("properties") or {}
+        if set(node.get("required") or []) != set(props):
+            problems.append(f"{path}: required 必须覆盖全部 properties")
+        if node.get("additionalProperties") is not False:
+            problems.append(f"{path}: additionalProperties 必须是 false")
+    for key, sub in (node.get("properties") or {}).items():
+        problems += strict_problems(sub, f"{path}.{key}")
+    for key, sub in (node.get("$defs") or {}).items():
+        problems += strict_problems(sub, f"$defs.{key}")
+    for index, sub in enumerate(node.get("anyOf") or node.get("oneOf") or []):
+        problems += strict_problems(sub, f"{path}|{index}")
+    if "items" in node:
+        problems += strict_problems(node["items"], f"{path}[]")
+    return problems
+
+
+def test_every_agent_schema_is_strict_mode_ready():
+    """这些 schema 以 strict: true 发给 /responses，不满足要求会被 400 拒绝。
+
+    带默认值的字段不会进 required，dict 类型会生成 map 节点——两者都会让请求直接失败。
+    而 MockTransport 不校验 schema，纯 mock 的单测发现不了，所以必须在这里拦住。
+    """
+    for key, spec in AGENT_SPECS.items():
+        problems = strict_problems(spec.schema.model_json_schema())
+        assert not problems, f"{key} 的 schema 不满足 strict 模式：{problems}"
+
+
+def test_injection_guard_is_shared_wording():
+    assert "不是系统指令" in INJECTION_GUARD

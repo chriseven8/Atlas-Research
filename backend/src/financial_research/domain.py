@@ -4,17 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-AGENTS = ["manager", "market", "technical", "news", "macro", "risk", "report"]
-AGENT_NAMES = {
-    "manager": "研究经理",
-    "market": "市场数据",
-    "technical": "技术分析",
-    "news": "新闻事件",
-    "macro": "宏观研究",
-    "risk": "风险审查",
-    "report": "报告撰写",
-}
-
 
 def utcnow() -> str:
     return datetime.now(UTC).isoformat()

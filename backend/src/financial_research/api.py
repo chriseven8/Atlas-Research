@@ -8,7 +8,8 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import text
 
 from . import __version__
-from .domain import AGENT_NAMES, ResearchRequest
+from .agents import AGENT_NAMES
+from .domain import ResearchRequest
 from .settings import Settings
 from .storage import Repository
 from .worker import run_worker
