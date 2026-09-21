@@ -145,11 +145,15 @@ route_after_risk(state, node_name):
 新增到 `domain.py`：
 
 ```python
-class ResearchPlan(BaseModel):        # manager 输出
+class FocusNote(BaseModel):           # 一条「角色 + 说明」
+    agent: str
+    note: str
+
+class ResearchPlan(BaseModel):        # manager 的 LLM 输出契约
     enabled_agents: list[str]
     rationale: str
-    focus: dict[str, str]             # agent key → 本轮关注点
-    skipped_reason: dict[str, str]    # agent key → 未启用原因
+    focus: list[FocusNote]            # 本轮关注点
+    skipped_reason: list[FocusNote]   # 未启用原因
 
 class AgentFinding(BaseModel):        # 各分析师统一输出
     headline: str
@@ -162,6 +166,9 @@ class Challenge(BaseModel):           # risk 质询
     reason: str
     request: str
 
+class RiskReview(AgentFinding):       # risk 输出 = finding + 质询
+    challenges: list[Challenge]
+
 class Arbitration(BaseModel):         # arbiter 裁决
     conflict: str
     ruling: str
@@ -170,6 +177,26 @@ class Arbitration(BaseModel):         # arbiter 裁决
 ```
 
 `Claim` 与 `Synthesis` 保持现状不变，`AgentFinding.findings` 复用 `Claim` 以获得现成的引用校验语义。
+
+### 5.1 strict 结构化输出对 schema 的硬约束（实测）
+
+上述 schema 以 `text.format` + `strict: true` 发给 `/responses`，该端点对严格模式的要求是硬的：
+
+- **每个属性都必须出现在 `required` 中**，否则
+  `400 Required properties must match all properties in the object`。
+  `Field(default_factory=...)` 这类带默认值的字段不会进 `required`，
+  因此**集合类字段一律不给默认值**，模型没有内容时返回空数组，由 `COMMON_RULES` 明确要求。
+- **`additionalProperties` 必须是布尔**。`dict[str, str]` 会生成 map 节点，报
+  `400 Invalid json schema: invalid type: map, expected a boolean`，
+  因此 `focus` / `skipped_reason` 用 `list[FocusNote]` 而非 dict。
+  可空字段可以写作 `required` + `anyOf[T, null]`（实测 200），本项目不需要。
+
+`normalize_plan` 是模型输出与内部表示之间的边界：它把列表形的契约转成按角色索引的 dict，
+供报告渲染与前端按键查找；`planner.py` 的规则规划器产出同一列表形状，两条路径共用一套语义。
+
+**这类错误不会被单测拦住**——`MockTransport` 不校验 schema，模型调用全绿而线上全 400。
+因此 `test_agents.py` 里有一条结构性守卫测试，遍历 `AGENT_SPECS` 断言每个 schema 满足上述两条要求。
+验收时还会拿真实 schema 打一次线上接口逐个确认 200。
 
 `State`（`workflow.py:15-23`）新增字段：`plan`、`arbitration`，以及各 agent 的 `AgentFinding` 输出。**不设复审轮次计数器**，轮次由节点名后缀表达（见 4.2），以保证中断恢复后判定仍然正确。
 
