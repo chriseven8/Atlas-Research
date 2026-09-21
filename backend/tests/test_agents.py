@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from pydantic import BaseModel, ValidationError
 
@@ -141,14 +143,28 @@ def test_only_data_source_backed_agents_are_plannable():
     assert set(PLANNABLE_AGENTS) <= set(OPTIONAL_AGENTS)
 
 
-def test_manager_prompt_enumerates_the_roster_by_name():
-    # manager 的 description 里逐个手写了角色名，模型据此决定启用谁。这段文字一旦与
-    # PLANNABLE_AGENTS / CORE_AGENTS 脱节（改名、增删角色），模型就会按错误的名单规划，
-    # 而 MockTransport 不校验语义，测试不会报错——所以在这里把两者绑在一起。
+def _agents_named_in(text: str) -> set[str]:
+    """一句话里点名了哪些角色 key（按词边界匹配，避免命中更长的标识符）。"""
+    return {key for key in AGENT_KEYS if re.search(rf"(?<![a-z_]){key}(?![a-z_])", text)}
+
+
+def test_manager_prompt_splits_plannable_and_resident_by_name():
+    # manager 的 description 里手写了角色名单，模型据此决定启用谁。只校验「名字出现过」不够：
+    # 把 news 从「可选角色」句搬进「常驻角色」句，名字仍在、测试全绿，模型却会按错误名单规划，
+    # 而 MockTransport 不校验语义。所以按句子切分，要求两句点名的集合与常量完全一致。
     description = AGENT_SPECS["manager"].description
+    sentences = [part for part in re.split(r"[。；\n]", description) if part.strip()]
+    plannable = [line for line in sentences if "只有两个" in line]
+    resident = [line for line in sentences if "是常驻角色" in line]
+    assert len(plannable) == 1, "manager 提示词应恰有一句说明可选角色"
+    assert len(resident) == 1, "manager 提示词应恰有一句说明常驻角色"
+    assert _agents_named_in(plannable[0]) == set(PLANNABLE_AGENTS), (
+        f"「可选角色」句点名的角色与 PLANNABLE_AGENTS 不一致：{plannable[0]}"
+    )
     # manager 自己不是被规划的角色，不需要在描述里点名。
-    for key in [*PLANNABLE_AGENTS, *(key for key in CORE_AGENTS if key != "manager")]:
-        assert key in description, f"manager 的 description 未提及角色 {key}"
+    assert _agents_named_in(resident[0]) == set(CORE_AGENTS) - {"manager"}, (
+        f"「常驻角色」句点名的角色与 CORE_AGENTS 不一致：{resident[0]}"
+    )
 
 
 def test_every_spec_has_a_role_prompt():
