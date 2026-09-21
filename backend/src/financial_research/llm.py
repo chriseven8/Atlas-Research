@@ -3,10 +3,8 @@ import json
 import httpx
 
 from .agents import AgentSpec
-from .domain import AgentFinding, Arbitration, OutputTruncated, ProviderError, ResearchPlan
+from .domain import AgentFinding, Arbitration, OutputTruncated, ProviderError, ResearchPlan, Synthesis
 from .settings import Settings
-
-PROMPT_VERSION = "atlas-agent-v1"
 
 
 def _extract_text(data: dict) -> str:
@@ -27,6 +25,9 @@ def validate_citations(result, allowed: set[str]) -> None:
     - ResearchPlan 不产出结论，只要求给出非空规划理由。
     - Arbitration 的裁决必须以非空 ruling 表述，其 evidence_ids 必须是提供集合的子集。
     - AgentFinding / RiskReview 与 Synthesis 都带 Claim 列表，要求结论非空且每条都引用了合法证据 ID。
+
+    按契约显式分派而非鸭子类型：新增契约若没在这里接上规则，必须直接拒绝，
+    否则会被下一条 `result.claims` 之类的猜测式取属性静默漏检。
     """
     if isinstance(result, ResearchPlan):
         if not result.rationale.strip():
@@ -38,16 +39,22 @@ def validate_citations(result, allowed: set[str]) -> None:
         if not set(result.evidence_ids) <= allowed:
             raise ValueError("invalid citation")
         return
-    claims = result.findings if isinstance(result, AgentFinding) else result.claims
-    headline = result.headline if isinstance(result, AgentFinding) else result.summary
-    if not claims or len(claims) > 12 or not headline.strip():
-        raise ValueError("empty or oversized findings")
-    if any(not c.text.strip() or not c.evidence_ids or not set(c.evidence_ids) <= allowed for c in claims):
-        raise ValueError("invalid citation")
+    if isinstance(result, (AgentFinding, Synthesis)):
+        claims = result.findings if isinstance(result, AgentFinding) else result.claims
+        headline = result.headline if isinstance(result, AgentFinding) else result.summary
+        if not claims or len(claims) > 12 or not headline.strip():
+            raise ValueError("empty or oversized findings")
+        if any(
+            not c.text.strip() or not c.evidence_ids or not set(c.evidence_ids) <= allowed for c in claims
+        ):
+            raise ValueError("invalid citation")
+        return
+    raise ValueError("unknown contract")
 
 
 def _usage(settings: Settings, data: dict, prompt_version: str) -> dict:
-    raw = data.get("usage", {})
+    # 用量是记账，不是结论。缺失或为 null 时按 0 计，不能因此让一份合法的 finding 作废。
+    raw = data.get("usage") or {}
     tokens_in = int(raw.get("input_tokens", 0))
     tokens_out = int(raw.get("output_tokens", 0))
     cost = None
@@ -84,7 +91,7 @@ def call_agent(settings: Settings, spec: AgentSpec, context: dict, transport=Non
         "text": {
             "format": {
                 "type": "json_schema",
-                "name": f"{spec.key}_finding",
+                "name": spec.schema.__name__,
                 "strict": True,
                 "schema": spec.schema.model_json_schema(),
             }
@@ -112,8 +119,11 @@ def call_agent(settings: Settings, spec: AgentSpec, context: dict, transport=Non
         text = _extract_text(data)
         result = spec.schema.model_validate_json(text)
         validate_citations(result, {e["id"] for e in context.get("evidence", [])})
-        return result.model_dump(), _usage(settings, data, spec.prompt_version)
     except OutputTruncated:
+        # 显式放行：截断是预算问题，不能被下面的宽 except 归成「输出不合法」。
+        # 这行也挡住日后有人往下面的元组里加 RuntimeError 而误吞截断信号。
         raise
     except (ValueError, TypeError, KeyError, AttributeError):
         raise ProviderError("模型输出未通过结构或引用校验，未将其纳入报告；已保留确定性研究结果。") from None
+    # 用量解析放在校验之外：它出错不该丢弃一份已通过校验的结论，也不该伪装成校验失败。
+    return result.model_dump(), _usage(settings, data, spec.prompt_version)

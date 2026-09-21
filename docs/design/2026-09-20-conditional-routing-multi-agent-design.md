@@ -276,7 +276,8 @@ def call_agent(settings, spec: AgentSpec, context: dict, transport=None) -> tupl
   否则新闻片段可以借由角色间的转发通道绕过这道防线抵达下游 agent。
 - `text.format` 的 schema 取 `spec.schema.model_json_schema()`。
 - 引用校验在返回前统一执行。
-- `PROMPT_VERSION` 机制保留，按 agent 记版本。
+- 版本机制保留，但改成按 agent 记：用量里的 `prompt_version` 取自 `spec.prompt_version`，
+  原有的模块级 `PROMPT_VERSION` 常量随 `synthesize` 一起删除（泛化后已无人引用）。
 
 `report` 的综合调用可继续复用 `synthesize()`，或并入 `call_agent` 并传 report 的 spec。实现时取后者以统一路径。
 

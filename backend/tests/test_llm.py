@@ -2,10 +2,11 @@ import json
 
 import httpx
 import pytest
+from pydantic import BaseModel
 
 from financial_research.agents import AGENT_SPECS
 from financial_research.domain import OutputTruncated, ProviderError
-from financial_research.llm import call_agent
+from financial_research.llm import call_agent, validate_citations
 
 
 def make_settings(settings):
@@ -215,3 +216,26 @@ def test_model_http_error_does_not_leak_key(settings):
 def test_unconfigured_model_is_rejected_before_any_request(settings):
     with pytest.raises(ProviderError, match="未配置"):
         call_agent(settings, AGENT_SPECS["technical"], {"evidence": []})
+
+
+def test_null_usage_does_not_discard_a_valid_finding(settings):
+    # 用量是记账，不是结论。usage 为 null 时仍要返回已通过校验的结论，只是按 0 计；
+    # 否则一份合法 finding 会因记账字段而作废，并被误报成「输出不合法」。
+    make_settings(settings)
+    data = response_with(finding_payload(["e1"]))
+    data["usage"] = None
+    mock = httpx.MockTransport(lambda _: httpx.Response(200, json=data))
+    result, usage = call_agent(settings, AGENT_SPECS["technical"], {"evidence": [{"id": "e1"}]}, mock)
+    assert result["headline"] == "样本期内呈上行特征"
+    assert usage["input_tokens"] == 0
+    assert usage["output_tokens"] == 0
+
+
+def test_unknown_contract_is_rejected_rather_than_guessed():
+    # 新增输出契约若没在 validate_citations 的显式分派里接上规则，必须直接拒绝，
+    # 而不是靠猜着取 result.claims 之类的属性静默漏检。
+    class Mystery(BaseModel):
+        note: str
+
+    with pytest.raises(ValueError, match="unknown contract"):
+        validate_citations(Mystery(note="x"), {"e1"})
