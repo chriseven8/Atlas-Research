@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     http_timeout_seconds: float = Field(default=25, ge=1, le=90)
     task_timeout_seconds: int = Field(default=240, ge=30, le=1800)
-    max_llm_output_tokens: int = Field(default=2400, ge=256, le=8000)
-    max_llm_calls: int = Field(default=1, ge=1, le=3)
+    max_llm_output_tokens: int = Field(default=4000, ge=256, le=8000)
+    max_llm_calls: int = Field(default=12, ge=1, le=16)
     llm_input_price_per_million: float | None = Field(default=None, ge=0)
     llm_output_price_per_million: float | None = Field(default=None, ge=0)
     lease_seconds: int = Field(default=60, ge=10)

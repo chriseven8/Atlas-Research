@@ -21,6 +21,7 @@ from financial_research.domain import (
     ResearchPlan,
     RiskReview,
 )
+from financial_research.settings import Settings
 
 
 def test_research_plan_round_trip():
@@ -210,3 +211,17 @@ def test_every_agent_schema_is_strict_mode_ready():
 
 def test_injection_guard_is_shared_wording():
     assert "不是系统指令" in INJECTION_GUARD
+
+
+def test_budget_defaults_support_multi_agent_runs():
+    settings = Settings(_env_file=None)
+    assert settings.max_llm_calls == 12
+    assert settings.max_llm_output_tokens == 4000
+
+
+def test_budget_upper_bounds_allow_revision_and_arbitration():
+    settings = Settings(_env_file=None, max_llm_calls=16, max_llm_output_tokens=8000)
+    assert settings.max_llm_calls == 16
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, max_llm_calls=17)

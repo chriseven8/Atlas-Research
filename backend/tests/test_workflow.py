@@ -115,10 +115,13 @@ def test_timeout_does_not_continue_work(repo, settings):
 
 
 def test_model_call_budget_is_durable(repo):
+    # 预算可持久化：按实际配置的预算耗尽后，超限调用不再放行。
+    budget = repo.settings.max_llm_calls
     job_id, job = create_claim(repo)
-    assert repo.reserve_call(job_id, job["owner"])
+    for _ in range(budget):
+        assert repo.reserve_call(job_id, job["owner"])
     assert repo.reserve_call(job_id, job["owner"]) is None
-    assert repo.get(job_id)["llm_calls"] == 1
+    assert repo.get(job_id)["llm_calls"] == budget
 
 
 def test_recovery_attempt_limit(repo, settings):
