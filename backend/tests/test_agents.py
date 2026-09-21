@@ -214,14 +214,37 @@ def test_injection_guard_is_shared_wording():
 
 
 def test_budget_defaults_support_multi_agent_runs():
+    """默认预算必须覆盖「初轮 8 角色 + 一轮返工 4 个」= 12 次，且留有余量。
+
+    刚好用满等于零余量：任何一个角色降级都会让后面的角色没得调。所以断言的是
+    「大于最坏值」而不是某个具体数字，免得每次调参都要改这里。
+    """
     settings = Settings(_env_file=None)
-    assert settings.max_llm_calls == 12
-    assert settings.max_llm_output_tokens == 4000
+    assert settings.max_llm_calls > 12
+    # 推理模型的 reasoning_tokens 与正文共享这一预算。实测：risk（要读完其余角色的
+    # 全部结论再审查）在 8000 上仍被 API 判 incomplete/max_output_tokens，
+    # 所以默认值必须严格大于 8000，而不只是「够大就行」。
+    assert settings.max_llm_output_tokens > 8000
+
+
+def test_single_call_timeout_leaves_room_for_a_whole_task():
+    """单次超时 × 链路上串行波次数必须小于任务级墙钟预算。
+
+    这条约束没有类型系统兜底，只能靠断言守住：把 HTTP 超时放大却不放任务超时，
+    失败形态会从「某次调用被截断」悄悄变成「整个任务被砍」。
+    """
+    settings = Settings(_env_file=None)
+    waves = 8  # manager / 取数波 / technical / risk / 返工波 / risk@1 / arbiter / report
+    assert settings.http_timeout_seconds * waves < settings.task_timeout_seconds
 
 
 def test_budget_upper_bounds_allow_revision_and_arbitration():
-    settings = Settings(_env_file=None, max_llm_calls=16, max_llm_output_tokens=8000)
+    settings = Settings(_env_file=None, max_llm_calls=16, max_llm_output_tokens=32000)
     assert settings.max_llm_calls == 16
+    assert settings.max_llm_output_tokens == 32000
 
+    # 上限本身也要能被触发，否则「可调到上限」这条断言是空的
     with pytest.raises(ValidationError):
         Settings(_env_file=None, max_llm_calls=17)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, max_llm_output_tokens=32001)
