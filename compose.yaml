@@ -39,7 +39,7 @@ services:
         condition: service_healthy
   api:
     <<: *backend
-    ports: ["127.0.0.1:8765:8000"]
+    ports: ["127.0.0.1:8877:8000"]
     depends_on:
       migrate:
         condition: service_completed_successfully

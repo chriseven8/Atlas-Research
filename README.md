@@ -138,7 +138,7 @@ npm run build
 docker compose up --build -d
 ```
 
-Compose 先等待 PostgreSQL 健康，再执行数据库迁移，随后启动 API、独立 Worker、Next.js。只向本机发布 3000 / 8765 端口，数据库使用命名卷持久保存。
+Compose 先等待 PostgreSQL 健康，再执行数据库迁移，随后启动 API、独立 Worker、Next.js。只向本机发布 3000 / 8877 端口，数据库使用命名卷持久保存。
 
 ```sh
 docker compose logs -f worker
