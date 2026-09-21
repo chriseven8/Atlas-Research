@@ -56,13 +56,20 @@ class AgentSpec:
 | key | role | description 要点 | optional |
 |---|---|---|---|
 | `manager` | 研究经理 | 根据用户问题制定研究计划，决定启用哪些角色并说明理由 | ✗ |
-| `market` | 市场数据专员 | 核对行情口径、数据日期与异常价格 | ✓ |
-| `technical` | 技术分析师 | 基于给定确定性指标解读趋势与动量，不做预测 | ✓ |
+| `market` | 市场数据专员 | 核对行情口径、数据日期与异常价格 | ✗ |
+| `technical` | 技术分析师 | 基于给定确定性指标解读趋势与动量，不做预测 | ✗ |
 | `news` | 事件分析师 | 从检索片段中提炼催化因素，标注信息不完备处 | ✓ |
 | `macro` | 宏观分析师 | 解释利率环境对估值的传导路径与局限 | ✓ |
 | `risk` | 风控审查官 | 质疑其他角色的结论，指出证据缺口，必要时要求返工 | ✗ |
 | `arbiter` | 首席仲裁 | 不同角色结论冲突时裁决并说明取舍依据 | ✓ 条件触发 |
 | `report` | 报告撰写 | 汇总各角色结论，标注不确定性与证据来源 | ✗ |
+
+`market` 与 `technical` 不可跳过：`technical` 读取 `state["market"]["bars"]` 计算指标，
+`risk` 与 `report` 又读取 `technical` 的指标。它们不在计划的可启停范围内，属结构性依赖。
+
+可被计划启停的只有两个数据源型角色：`news`、`macro`（见 `PLANNABLE_AGENTS`）。
+`arbiter` 是 `optional`，但不由计划触发——它由 `risk` 检测到的方向冲突触发，
+因此不在 `PLANNABLE_AGENTS` 中。
 
 `domain.py:7-16` 的 `AGENTS` 与 `AGENT_NAMES` 改为从 `agents.py` 派生，消除两处维护。
 
