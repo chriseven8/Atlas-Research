@@ -118,24 +118,39 @@ class Synthesis(BaseModel):
     uncertainties: list[str]
 
 
+class FocusNote(BaseModel):
+    """某个角色的一项说明：本轮关注点，或未启用该角色的原因。"""
+
+    model_config = ConfigDict(extra="forbid")
+    agent: str
+    note: str
+
+
 class ResearchPlan(BaseModel):
-    """Manager 产出的研究计划，决定本轮启用哪些可选角色。"""
+    """Manager 的 LLM 输出契约，决定本轮启用哪些可选角色。
+
+    strict 模式要求所有属性都进 required、且不允许 map 类型，因此 focus / skipped_reason
+    用列表而非 dict；normalize_plan 负责转成按角色索引的内部形状供报告与前端使用。
+    """
 
     model_config = ConfigDict(extra="forbid")
     enabled_agents: list[str]
     rationale: str
-    focus: dict[str, str] = Field(default_factory=dict)
-    skipped_reason: dict[str, str] = Field(default_factory=dict)
+    focus: list[FocusNote]
+    skipped_reason: list[FocusNote]
 
 
 class AgentFinding(BaseModel):
-    """所有研究型 agent 的统一输出契约。"""
+    """所有研究型 agent 的统一输出契约。
+
+    集合类字段不给默认值：strict 模式下带默认值的属性无法进 required，模型必须显式返回空数组。
+    """
 
     model_config = ConfigDict(extra="forbid")
     headline: str
     findings: list[Claim]
     confidence: Literal["high", "medium", "low"]
-    open_questions: list[str] = Field(default_factory=list)
+    open_questions: list[str]
 
 
 class Challenge(BaseModel):
@@ -150,8 +165,7 @@ class Challenge(BaseModel):
 class RiskReview(AgentFinding):
     """风控输出：在通用 finding 之上附加可执行的返工要求。"""
 
-    model_config = ConfigDict(extra="forbid")
-    challenges: list[Challenge] = Field(default_factory=list)
+    challenges: list[Challenge]
 
 
 class Arbitration(BaseModel):

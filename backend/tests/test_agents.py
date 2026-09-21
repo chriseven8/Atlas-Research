@@ -6,6 +6,7 @@ from financial_research.domain import (
     Arbitration,
     Challenge,
     Claim,
+    FocusNote,
     ResearchPlan,
     RiskReview,
 )
@@ -15,8 +16,11 @@ def test_research_plan_round_trip():
     plan = ResearchPlan(
         enabled_agents=["market", "technical", "news"],
         rationale="问题聚焦价格与事件",
-        focus={"market": "核对复权口径", "technical": "关注动量"},
-        skipped_reason={"macro": "A 股宏观未接入"},
+        focus=[
+            FocusNote(agent="market", note="核对复权口径"),
+            FocusNote(agent="technical", note="关注动量"),
+        ],
+        skipped_reason=[FocusNote(agent="macro", note="A 股宏观未接入")],
     )
     assert ResearchPlan.model_validate(plan.model_dump()) == plan
 
@@ -24,6 +28,12 @@ def test_research_plan_round_trip():
 def test_research_plan_rejects_unknown_field():
     with pytest.raises(ValidationError):
         ResearchPlan(enabled_agents=[], rationale="x", unexpected=1)
+
+
+def test_research_plan_requires_every_field():
+    # strict 模式下带默认值的字段进不了 required，因此这些字段一律必填。
+    with pytest.raises(ValidationError):
+        ResearchPlan(enabled_agents=[], rationale="x", focus=[])
 
 
 def test_agent_finding_reuses_claim_semantics():
@@ -69,6 +79,22 @@ def test_risk_review_extends_finding_with_challenges():
     assert dumped["findings"][0]["evidence_ids"] == ["news-abc"]
 
 
-def test_risk_review_defaults_to_no_challenges():
-    review = RiskReview(headline="结论已被证据支持", findings=[], confidence="high")
+def test_risk_review_accepts_an_explicitly_empty_challenge_list():
+    review = RiskReview(
+        headline="结论已被证据支持",
+        findings=[],
+        confidence="high",
+        open_questions=[],
+        challenges=[],
+    )
     assert review.challenges == []
+
+
+def test_agent_finding_requires_open_questions():
+    with pytest.raises(ValidationError):
+        AgentFinding(headline="x", findings=[], confidence="high")
+
+
+def test_risk_review_requires_challenges():
+    with pytest.raises(ValidationError):
+        RiskReview(headline="x", findings=[], confidence="high", open_questions=[])
