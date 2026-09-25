@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+# 手工指定 --basetemp 跑测试时的落盘目录，不入库
+.pytest-resume-tmp/
 .env
 data/
 *.egg-info/
