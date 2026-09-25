@@ -3,8 +3,8 @@
 日期：2026-09-20。环境：Windows、Python 3.11.5、Node.js 24.19.0；依赖版本见 `backend/requirements.lock` 与 `frontend/package-lock.json`。
 
 > 本文是**当时那次验收的快照**，数字与角色数量都停留在该版本（七个常驻角色、63–66 项测试）。
-> 其后工作流已改为条件路由的八个角色，测试数与节点数见
-> `docs/architecture.md` 与 `docs/architecture.md`。
+> 其后工作流已改为条件路由的八个角色，当前节点结构与改造理由见
+> `docs/architecture.md` 与 `docs/design/2026-09-20-conditional-routing-multi-agent-design.md`。
 > 下方表格中有「7 个完成节点」「七个角色」一类表述的，都读作该快照，不代表当前实现。
 >
 > 后端端口同样作废：本文写的 8765 后来也被 Windows 保留端口范围吞掉了
