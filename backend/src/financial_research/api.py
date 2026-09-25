@@ -57,7 +57,7 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             "llm_ready": settings.llm_ready,
             "demo_symbols": ["AAPL", "MSFT", "NVDA", "SPY"],
             "agents": AGENT_NAMES,
-            "max_lookback_days": 100,
+            "max_lookback_days": 300,
             "version": __version__,
             "markets": ["CN", "US"],
             "market_provider": "腾讯财经公共行情",

@@ -22,6 +22,15 @@ def test_demo_is_deterministic_and_honest():
     assert all(n["url"] is None for n in DemoProvider().news(req)["items"])
 
 
+def test_demo_can_supply_the_full_lookback_upper_bound():
+    """日期生成窗口必须够宽：300 个交易日约合 430 个自然日，窗口窄了就会静默少给。"""
+    bars = DemoProvider().market(ResearchRequest(as_of="2026-06-10", lookback_days=300))["bars"]
+    assert len(bars) == 300
+    assert max(x["date"] for x in bars) <= "2026-06-10"
+    # 取的是序列末端的最近 N 条，放宽窗口不应改变最近日期的取值
+    assert bars[-1] == DemoProvider().market(ResearchRequest(as_of="2026-06-10"))["bars"][-1]
+
+
 @pytest.mark.parametrize(
     "data", [{"Information": "secret quota"}, {"Note": "secret rate"}, {"Error Message": "secret bad key"}]
 )
@@ -91,3 +100,20 @@ def test_market_filters_future_data_and_checks_quality(settings):
     series["2026-05-02"]["4. close"] = "nan"
     with pytest.raises(ProviderError, match="质量"):
         provider.market(ResearchRequest(mode="live", as_of="2026-06-01"))
+
+
+@pytest.mark.parametrize("lookback,expected", [(90, "compact"), (100, "compact"), (300, "full")])
+def test_market_asks_for_the_range_it_needs(settings, lookback, expected):
+    """compact 只回 100 个交易日；长区间仍用 compact 会被上游静默截断成 100 条。"""
+    settings.alpha_vantage_api_key = "test"
+    seen = {}
+
+    def respond(req):
+        seen["outputsize"] = req.url.params["outputsize"]
+        return httpx.Response(200, json={"Time Series (Daily)": {}})
+
+    with pytest.raises(ProviderError):
+        AlphaVantageProvider(settings, httpx.MockTransport(respond)).market(
+            ResearchRequest(mode="live", as_of="2026-06-01", lookback_days=lookback)
+        )
+    assert seen["outputsize"] == expected

@@ -1,3 +1,4 @@
+import re
 import time
 from itertools import pairwise
 from typing import TypedDict
@@ -5,8 +6,9 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from .agents import AGENT_NAMES, AGENT_SPECS, PLANNABLE_AGENTS
-from .analytics import analyze
-from .domain import LeaseLost, ProviderError, ResearchRequest, utcnow
+from .analytics import analyze, daily_facts
+from .china_fundamentals import fetch_china_fundamentals
+from .domain import Bar, LeaseLost, ProviderError, ResearchRequest, utcnow
 from .llm import call_agent
 from .planner import normalize_plan, rule_plan
 from .providers import provider_for
@@ -17,6 +19,58 @@ REVISION_SUFFIX = "@1"
 # 只有这三个角色可以返工：market 是取数、risk 是审查方、report 是汇总方，返工它们没有语义。
 REVISABLE = ("technical", "news", "macro")
 FINDING_AGENTS = ("market", "technical", "news", "macro")
+# 财务数据域。它不是角色（不在 AGENT_SPECS / PLANNABLE_AGENTS 里），因此不可返工、不调用模型，
+# 只做确定性取数并进证据池。放在这里是为了让「进白名单/覆盖判定/完整性判定」三处引用同一个常量，
+# 漏一处的表现是数据取到了却在报告里像没取过。
+FUNDAMENTALS_NODE = "fundamentals"
+
+# 本系统的设计边界：不是「数据源没给」，而是「这部分本来就不在本系统的范围内」。
+# 逐条写进规划、风控与报告的上下文，好让各角色一次读完就不再把它当作数据缺口反复追问；
+# render_markdown 也据此把命中的 open_question 单独归入「设计边界」段，与真正的待解问题分开。
+DESIGN_LIMITS: tuple[dict, ...] = (
+    {
+        "label": "浮动/固定利率债务拆分",
+        "detail": "上游只披露负债总额、资产负债率与利息保障倍数，不区分浮动与固定利率债务，也不给到期结构。",
+        "keywords": ("浮动利率", "固定利率", "债务结构", "债务拆分", "到期结构", "有息负债结构"),
+    },
+    {
+        "label": "加权平均融资成本",
+        "detail": "利息保障倍数与有息负债率可得，但逐笔融资的利率与权重不公开，无法计算加权平均融资成本。",
+        "keywords": ("融资成本", "加权平均成本", "资本成本", "WACC"),
+    },
+    {
+        "label": "分析师一致预期",
+        "detail": "免费公开源不提供一致预期（机构对营收/利润预测的汇总）。本系统不自行估算盈利预测。",
+        "keywords": ("一致预期", "盈利预期", "分析师预期", "预期差", "盈利预测"),
+    },
+    {
+        "label": "股权风险溢价",
+        "detail": "无风险利率可得，但股权风险溢价需要市场组合的长期风险溢价估计，本系统不自行估算。",
+        "keywords": ("股权风险溢价", "风险溢价", "ERP"),
+    },
+    {
+        "label": "折现率到估值的量化传导",
+        "detail": "从折现率变动推到目标价的量化传导需要盈利预测与永续增长假设，属于估值建模，不在本系统范围。",
+        "keywords": ("估值传导", "目标价", "估值模型", "DCF", "折现模型", "绝对估值"),
+    },
+)
+DESIGN_LIMIT_NOTE = (
+    "以下各项是本系统的设计边界，不是数据缺口：不要把它们列为待解问题，也不要要求补充这些数据。"
+)
+
+
+def design_limit_of(question: str) -> dict | None:
+    """判断一条待解问题是否落在设计边界内，用于渲染时把它与真正的问题分开。
+
+    只是关键词匹配：模型不会照抄 prompt 里的措辞，所以匹配不到时宁可当作真问题保留，
+    也不做模糊判断——把真问题误标成设计边界，会让报告丢掉唯一一条该看的线索。
+    """
+    text = str(question).casefold()
+    for limit in DESIGN_LIMITS:
+        if any(keyword.casefold() in text for keyword in limit["keywords"]):
+            return limit
+    return None
+
 
 # 节点名带 @1 后缀。后缀同时是 (job_id, name) 缓存键的一部分，
 # 因此复审不会被 start_node 命中缓存而跳过，中断恢复后的轮次判定也依然正确。
@@ -28,6 +82,10 @@ RISK_REVISION = f"risk{REVISION_SUFFIX}"
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
 
+# 附给市场数据专员的最近逐日明细条数。连续性/零成交/跳空的结论由全样本的 daily_facts 给出，
+# 这段只是让他能就近核对最近几天的价量，不必为此把整条序列塞进上下文。
+RECENT_DAYS = 20
+
 State = TypedDict(
     "State",
     {
@@ -37,6 +95,7 @@ State = TypedDict(
         "technical": dict,
         "news": dict,
         "macro": dict,
+        "fundamentals": dict,
         "risk": dict,
         "arbiter": dict,
         "report": dict,
@@ -159,7 +218,17 @@ class ResearchWorkflow:
 
     def run(self) -> State:
         graph = StateGraph(State)
-        for name in ("manager", "market", "technical", "news", "macro", "risk", "arbiter", "report"):
+        for name in (
+            "manager",
+            "market",
+            "technical",
+            "news",
+            "macro",
+            FUNDAMENTALS_NODE,
+            "risk",
+            "arbiter",
+            "report",
+        ):
             graph.add_node(name, self.wrap(name))
         for name in REVISION_NODES:
             graph.add_node(name, self.wrap(name))
@@ -168,12 +237,14 @@ class ResearchWorkflow:
         graph.add_edge(START, "manager")
         # technical 只由 market 触发：它要读 state["market"]。若这里再补一条 manager→technical，
         # langgraph 会在 market 完成前就并行执行 technical，读不到行情。
-        for name in ("market", "news", "macro"):
+        # fundamentals 是纯取数节点，不依赖其它节点，故与 market/news/macro 并列由 manager 触发；
+        # 它并入下面的汇合屏障，因此风控一定读到的是「已取回或已明确失败」的财务数据。
+        for name in ("market", "news", "macro", FUNDAMENTALS_NODE):
             graph.add_edge("manager", name)
         graph.add_edge("market", "technical")
-        # 汇合屏障：三个分析角色全部触发后 risk 才执行。被计划跳过的角色也会走到这里（no-op），
+        # 汇合屏障：四个数据/分析角色全部触发后 risk 才执行。被计划跳过的角色也会走到这里（no-op），
         # 所以屏障不会死锁——这正是选择「节点常驻 + 计划驱动 no-op」而不是动态删边的原因。
-        graph.add_edge(["technical", "news", "macro"], "risk")
+        graph.add_edge(["technical", "news", "macro", FUNDAMENTALS_NODE], "risk")
         destinations = ["arbiter", *REVISION_NODES]
         for source in ("risk", RISK_REVISION):
             graph.add_conditional_edges(source, self.router_for(source), destinations)
@@ -231,6 +302,13 @@ class ResearchWorkflow:
 
     # ---------- 各角色的输入构造 ----------
 
+    def design_limits(self) -> dict:
+        """设计边界清单。三处上下文共用一份，避免同一句话在两个 prompt 里写成两种口径。"""
+        return {
+            "note": DESIGN_LIMIT_NOTE,
+            "items": [{"label": item["label"], "detail": item["detail"]} for item in DESIGN_LIMITS],
+        }
+
     def planning_context(self) -> dict:
         return {
             "question": self.req.question,
@@ -240,28 +318,33 @@ class ResearchWorkflow:
             "as_of": str(self.req.as_of),
             "lookback_days": self.req.lookback_days,
             "plannable_agents": list(PLANNABLE_AGENTS),
+            "design_limits": self.design_limits(),
             "available_sources": {
                 "market": "沪深京与美股已收盘日线（无需密钥）",
                 "news_cn": "东方财富个股新闻与公司公告（无需密钥）",
                 "news_us": "Alpha Vantage 新闻情绪"
                 if self.settings.alpha_vantage_api_key
                 else "未配置，美国新闻不可用",
-                "macro_cn": "中国 10 年期国债到期收益率（东方财富，无需密钥）",
+                "macro_cn": "10 年期国债收益率、CPI/PPI 同比、M2/M1 同比、存款准备金率、制造业 PMI（东方财富，无需密钥）",
                 "macro_us": "Alpha Vantage / FRED 联邦基金利率"
                 if self.settings.alpha_vantage_api_key
                 else "未配置，美国宏观不可用",
+                "fundamentals_cn": "A 股主要财务指标：营收/毛利率/归母净利/加权ROE/经营现金流/"
+                "资产负债率/利息保障倍数（东方财富，无需密钥；不占角色名额）",
+                "fundamentals_us": "未提供，免费源不覆盖美国上市公司财报",
             },
         }
 
     def market_context(self, output: dict) -> dict:
         bars = output.get("bars") or []
-        moves = [abs(b["close"] / a["close"] - 1) for a, b in pairwise(bars)]
+        clean = sorted((Bar.model_validate(b) for b in bars), key=lambda b: b.date)
         return {
             "question": self.req.question,
             "symbol": self.req.symbol,
             "market": self.req.market,
             "adjustment": output.get("adjustment"),
             "currency": output.get("currency"),
+            "volume_unit": "股",
             "bars_summary": {
                 "count": len(bars),
                 "first_date": bars[0]["date"] if bars else None,
@@ -269,8 +352,30 @@ class ResearchWorkflow:
                 "last_close": bars[-1]["close"] if bars else None,
                 "max_close": max((b["close"] for b in bars), default=None),
                 "min_close": min((b["close"] for b in bars), default=None),
-                "largest_daily_move_pct": round(max(moves, default=0.0) * 100, 2),
             },
+            # 全样本的连续性、极值、量价事实在这里一次给全，避免模型再逐个索要「逐日明细」。
+            "daily_facts": daily_facts(clean),
+            # 成交额取不到要写明，否则模型会把「上游没给」读成「没去看」而反复索要。
+            "amount_available": any(b["amount"] is not None for b in bars),
+            "amount_note": "本行情源只提供成交量（股），不提供成交额；未以 成交量×均价 估算。",
+            # 除权归因与第二源交叉校验：前者回答「这根跳变是不是分红送转造成的」，
+            # 后者回答「这家供应商的数据有没有错」，两条都只给确定性结论，不下判断。
+            "corporate_actions": output.get("corporate_actions") or [],
+            "action_attribution": output.get("action_attribution"),
+            "cross_check": output.get("cross_check"),
+            # 只附最近一小段逐日明细用于就近核对；连续性结论来自上面的全样本事实，不靠肉眼扫全表。
+            "recent_days": [
+                {
+                    "date": str(b.date),
+                    "open": b.open,
+                    "high": b.high,
+                    "low": b.low,
+                    "close": b.close,
+                    "volume": b.volume,
+                    "amount": b.amount,
+                }
+                for b in clean[-RECENT_DAYS:]
+            ],
             "warnings": output.get("warnings", []),
             "evidence": output.get("evidence", []),
         }
@@ -306,19 +411,37 @@ class ResearchWorkflow:
         }
 
     def macro_context(self, output: dict) -> dict:
+        # 逐指标送：每项只带最近的观测与全窗口极值，避免 7 个指标 × 12 条把上下文撑爆。
+        # 每项都带自己的统计口径（stats.first_date/last_date/n），模型就不必猜
+        # 「note 说的起点和清单为什么对不上」。
         return {
             "question": self.req.question,
             "symbol": self.req.symbol,
             "market": self.req.market,
+            "indicators": [
+                {
+                    "name": item.get("name"),
+                    "unit": item.get("unit"),
+                    "items": item.get("items") or [],
+                    "stats": item.get("stats"),
+                    "evidence_id": item.get("evidence_id"),
+                }
+                for item in (output.get("indicators") or [])
+            ],
+            # 演示模式与规则降级路径只给得出扁平 items，这里保留一份以便两条路径同构。
             "items": (output.get("items") or [])[:12],
             "warnings": output.get("warnings", []),
             "evidence": output.get("evidence", []),
         }
 
     def evidence_pool(self, state: State) -> list[dict]:
-        """汇总本轮所有可用证据，作为引用校验的白名单。"""
+        """汇总本轮所有可用证据，作为引用校验的白名单。
+
+        fundamentals 必须在这里：财务证据不进白名单，模型引用它就会被判为伪造引用，
+        于是「取到了」与「取不到」在报告里长得一模一样。
+        """
         pool: dict[str, dict] = {}
-        for key in (*FINDING_AGENTS, *REVISION_NODES):
+        for key in (*FINDING_AGENTS, FUNDAMENTALS_NODE, *REVISION_NODES):
             for item in (state.get(key) or {}).get("evidence") or []:
                 pool[item["id"]] = item
         return list(pool.values())
@@ -396,6 +519,7 @@ class ResearchWorkflow:
             "revisable_agents": list(REVISABLE),
             "is_revision_round": any(state.get(name) for name in REVISION_NODES),
             "agent_outputs": digests,
+            "design_limits": self.design_limits(),
             "evidence": self.evidence_pool(state),
         }
 
@@ -438,6 +562,7 @@ class ResearchWorkflow:
                 for key in PLANNABLE_AGENTS
                 if (state.get(key) or {}).get("status") == "skipped"
             ],
+            "design_limits": self.design_limits(),
             "evidence": self.evidence_pool(state),
         }
 
@@ -556,13 +681,21 @@ class ResearchWorkflow:
             return self.skipped_output("macro", state)
         try:
             output = self.provider.macro(self.req)
-            latest = output["items"][0]
+            # 多个指标各有各的最新一期，取「最近观测期」这一个说法就不再成立：
+            # 国债收益率是日频、CPI 是月频还有发布时滞，混着报会让人以为它们同期。
+            latest: dict[str, dict] = {}
+            for item in sorted(output.get("items") or [], key=lambda i: i.get("date", ""), reverse=True):
+                latest.setdefault(item.get("name", ""), item)
+            summary = "宏观观测：" + "；".join(
+                f"{name} {item['value']}{item.get('unit', '')}（{item['date']}）"
+                for name, item in latest.items()
+            )
             deterministic = {
                 **output,
-                "status": "completed",
+                "status": "completed" if output.get("complete", True) else "partial",
                 "agent": "macro",
-                "summary": f"最近观测期 {latest['date']}，利率 {latest['value']:.2f}%。",
-                "interpretation": "利率变化可能通过融资成本和折现率影响估值；方向和强度依赖企业盈利与市场预期，单一利率不能确定价格方向。",
+                "summary": summary,
+                "interpretation": "利率、通胀与信用环境通过融资成本和折现率影响估值；方向和强度依赖企业盈利与市场预期，单一指标不能确定价格方向。",
             }
         except ProviderError as exc:
             return {
@@ -576,6 +709,42 @@ class ResearchWorkflow:
         if not deterministic["items"]:
             return deterministic
         return self.run_agent("macro", self.macro_context(deterministic), deterministic)
+
+    def node_fundamentals(self, state: State, name: str) -> dict:
+        """财务数据域节点：确定性取数，不调用模型，也不占角色名额。
+
+        美股侧不提供（免费源不覆盖）——这里返回 skipped 而不是 partial，
+        因为「按设计不提供」与「本轮取数失败」在报告里的含义不同：前者不该把
+        每份美股报告都拖成 partial，后者才该。
+        """
+        if self.req.market != "CN":
+            return {
+                **SKIPPED_DEFAULTS,
+                "status": "skipped",
+                "agent": FUNDAMENTALS_NODE,
+                "summary": "财务数据本轮未启用。",
+                "reason": "美国上市公司财报需要付费数据源，本系统不提供；未以估计值替代。",
+            }
+        try:
+            output = fetch_china_fundamentals(self.req, self.settings, self.transport)
+        except ProviderError as exc:
+            return {
+                **SKIPPED_DEFAULTS,
+                "status": "partial",
+                "agent": FUNDAMENTALS_NODE,
+                "summary": "财务数据不可用。",
+                "warnings": [str(exc)],
+            }
+        latest = output["latest"]
+        return {
+            **output,
+            "status": "completed",
+            "agent": FUNDAMENTALS_NODE,
+            "summary": (
+                f"取得 {len(output['items'])} 期主要财务指标，最新为 {latest['report_name']}"
+                f"（公告日 {latest['notice_date']}）；数值取自财报接口，未做预测或估值。"
+            ),
+        }
 
     def risk_signals(self, state: State) -> tuple[list[dict], list[str]]:
         metrics = (state.get("technical") or {}).get("metrics") or {}
@@ -604,6 +773,27 @@ class ResearchWorkflow:
                     "level": "warning",
                     "title": "未复权行情",
                     "detail": "拆股和分红可能产生虚假跳变；本报告不计算总回报。",
+                }
+            )
+        # 交叉校验的三种结论都要显式出现在风险清单里：只有「没查出问题」和
+        # 「没去查」被分开写，读者才知道该不该信这份行情。
+        cross = market.get("cross_check") or {}
+        if cross.get("status") == "mismatch":
+            risks.append(
+                {
+                    "level": "high",
+                    "title": "第二行情源比对不一致",
+                    "detail": f"与{cross.get('source')}在重叠交易日上存在超出 "
+                    f"{cross.get('tolerance_pct')}% 容差的差异，应先核查数据再使用行情结论。",
+                }
+            )
+        elif cross.get("status") == "unavailable":
+            risks.append(
+                {
+                    "level": "warning",
+                    "title": "未能交叉校验行情",
+                    "detail": f"第二行情源本轮不可用（{cross.get('reason', '未知原因')}），"
+                    "主序列未经独立源核对。",
                 }
             )
         bars = market.get("bars") or []
@@ -657,7 +847,9 @@ class ResearchWorkflow:
             "technical": True,
             "news": bool((state.get("news") or {}).get("items")),
             "macro": bool((state.get("macro") or {}).get("items")),
-            "fundamentals": False,
+            # 覆盖率按「本轮真的取到几期」如实填，不因为节点跑过就写 True：
+            # 节点存在与数据存在是两件事，覆盖率回答的是后者。
+            "fundamentals": bool((state.get(FUNDAMENTALS_NODE) or {}).get("items")),
         }
         deterministic = {
             "status": "completed",
@@ -768,7 +960,7 @@ class ResearchWorkflow:
         # risk 与 arbiter 同样会调用模型，它们的降级原因必须一并收进 limitations。
         # 漏掉这两个键会让「风控的模型调用失败」表现为一份没有任何提示的 completed 报告：
         # 确定性风控结论照常产出，只是模型那一层哑火，而报告对此只字不提。
-        for key in (*FINDING_AGENTS, "risk", "arbiter", *REVISION_NODES):
+        for key in (*FINDING_AGENTS, FUNDAMENTALS_NODE, "risk", "arbiter", *REVISION_NODES):
             for warning in (state.get(key) or {}).get("warnings") or []:
                 if warning not in limitations:
                     limitations.append(warning)
@@ -776,6 +968,11 @@ class ResearchWorkflow:
             output = state.get(key) or {}
             if output.get("status") == "skipped" and output.get("reason"):
                 limitations.append(f"{AGENT_SPECS[key].role}本轮未启用：{output['reason']}")
+        # 财务数据域不是角色，因此不走上面那条 PLANNABLE_AGENTS 分支；但「美股不提供」
+        # 是一个读者必须知道的口径，不能只留在节点输出里。
+        fundamentals = state.get(FUNDAMENTALS_NODE) or {}
+        if fundamentals.get("status") == "skipped" and fundamentals.get("reason"):
+            limitations.append(f"财务数据未启用：{fundamentals['reason']}")
 
         metrics = state["technical"]["metrics"]
         summary = (
@@ -811,7 +1008,7 @@ class ResearchWorkflow:
                 "AI 研判已校验结构和引用 ID，但未自动证明每个推断均被原文支持；请结合来源审阅。"
             )
 
-        witness = (*FINDING_AGENTS, "risk", "arbiter", *REVISION_NODES)
+        witness = (*FINDING_AGENTS, FUNDAMENTALS_NODE, "risk", "arbiter", *REVISION_NODES)
         partial = ai_failed or any((state.get(key) or {}).get("status") == "partial" for key in witness)
 
         result = {
@@ -893,9 +1090,27 @@ class ResearchWorkflow:
 
 
 def render_markdown(report: dict) -> str:
+    # 证据编号就是「证据来源」小节的序号：正文里的引用一律换算成它。market-3f2a… 这类标识
+    # 只有程序认得，印在给用户读的正文里等于什么都没说，也回指不到任何东西。
+    index = {ev["id"]: f"{position + 1:02d}" for position, ev in enumerate(report["evidence"])}
+    # 只替换真实存在的证据 ID（而不是按「kind-12 位十六进制」的形状去猜），
+    # 这样正文里任何别的连字符词都不会被误伤。
+    known = (
+        re.compile("|".join(re.escape(key) for key in sorted(index, key=len, reverse=True)))
+        if index
+        else None
+    )
+
+    def cite(ids) -> str:
+        if not ids:
+            return "未标注来源"
+        return "来源 " + "、".join(index.get(eid, eid) for eid in ids)
+
     # Escape external text so the downloadable Markdown cannot introduce raw HTML/images.
     def safe(value) -> str:
         value = str(value).replace("<", "&lt;").replace(">", "&gt;")
+        if known:
+            value = known.sub(lambda hit: f"来源 {index[hit.group(0)]}", value)
         for char in ["\\", "[", "]", "*", "_", "`", "#", "!"]:
             value = value.replace(char, "\\" + char)
         return value.replace("\r", " ").replace("\n", " ")
@@ -924,26 +1139,37 @@ def render_markdown(report: dict) -> str:
         lines.append(f"- 未启用 {safe(key)}：{safe(reason)}")
     lines.extend(["", "## 摘要", safe(report["summary"]), "", "## 技术观察"])
     for claim in report["claims"]:
-        lines.append(f"- {safe(claim['text'])}（{', '.join(claim['evidence_ids'])}）")
+        lines.append(f"- {safe(claim['text'])}（{cite(claim['evidence_ids'])}）")
     lines.extend(["", "## 新闻事件"])
     for item in report["news"]:
-        lines.append(f"- {safe(item['title'])} — {safe(item['summary'])}（{item['evidence_id']}）")
+        lines.append(f"- {safe(item['title'])} — {safe(item['summary'])}（{cite([item['evidence_id']])}）")
     if not report["news"]:
         lines.append("没有可用新闻证据。")
     lines.extend(["", "## 宏观背景", safe(report["macro"].get("summary", ""))])
     if report["macro"].get("interpretation"):
         lines.append(safe(report["macro"]["interpretation"]))
     findings = report.get("agent_findings") or {}
+    boundaries: list[tuple[str, str]] = []
     if findings:
         lines.extend(["", "## 各角色研判"])
         for key, finding in findings.items():
             base = key[: -len("@1")] if key.endswith("@1") else key
-            lines.append(f"### {safe(AGENT_NAMES.get(base, base))}{'（复审）' if key.endswith('@1') else ''}")
+            role = AGENT_NAMES.get(base, base)
+            lines.append(f"### {safe(role)}{'（复审）' if key.endswith('@1') else ''}")
             lines.append(safe(finding.get("headline") or ""))
             for claim in finding.get("findings") or []:
-                lines.append(f"- {safe(claim.get('text'))}（{', '.join(claim.get('evidence_ids') or [])}）")
+                lines.append(f"- {safe(claim.get('text'))}（{cite(claim.get('evidence_ids') or [])}）")
             for question in finding.get("open_questions") or []:
+                # 落在设计边界内的问题单独成段：它们不是数据缺口，混在待解问题里
+                # 会把「这一轮到底还差什么」淹掉。
+                limit = design_limit_of(question)
+                if limit:
+                    boundaries.append((role, f"{question}（{limit['label']}：{limit['detail']}）"))
+                    continue
                 lines.append(f"- 待解问题：{safe(question)}")
+    if boundaries:
+        lines.extend(["", "## 设计边界（非数据缺口）", DESIGN_LIMIT_NOTE])
+        lines.extend(f"- {safe(role)}：{safe(text)}" for role, text in boundaries)
     if report.get("challenges"):
         lines.extend(["", "## 质询与返工"])
         for item in report["challenges"]:
@@ -962,17 +1188,18 @@ def render_markdown(report: dict) -> str:
     if report["ai_synthesis"]:
         lines.extend(["", "## AI 研判（待人工审阅）", safe(report["ai_synthesis"]["summary"])])
         for claim in report["ai_synthesis"]["claims"]:
-            lines.append(f"- {safe(claim['text'])}（{', '.join(claim['evidence_ids'])}）")
+            lines.append(f"- {safe(claim['text'])}（{cite(claim['evidence_ids'])}）")
         lines.extend(f"- 不确定性：{safe(x)}" for x in report["ai_synthesis"]["uncertainties"])
     lines.extend(["", "## 风险与分歧"])
     lines.extend(f"- {safe(r['title'])}：{safe(r['detail'])}" for r in report["risks"])
     lines.extend(f"- 分歧：{safe(x)}" for x in report["conflicts"])
     lines.extend(["", "## 数据限制"])
     lines.extend(f"- {safe(x)}" for x in report["limitations"])
-    lines.extend(["", "## 证据来源"])
+    lines.extend(["", "## 证据来源", "正文中的「来源 NN」对应该小节序号。"])
     for ev in report["evidence"]:
         lines.append(
-            f"- {ev['id']} · {safe(ev['source'])} · {safe(ev['title'])} · 观测/发布：{safe(ev['observed_at'])}"
+            f"- {index.get(ev['id'], '—')} · {ev['id']} · {safe(ev['source'])} · {safe(ev['title'])}"
+            f" · 观测/发布：{safe(ev['observed_at'])}"
         )
         if ev["url"]:
             lines.append(f"  来源地址：{safe(ev['url'])}")

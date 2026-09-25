@@ -92,3 +92,35 @@
 `TASK_TIMEOUT_SECONDS` 与 `HTTP_TIMEOUT_SECONDS` 必须同向调整：任务超时是整条链路的墙钟预算，实测一次完整研究（12 次调用含一轮返工）耗时 **225s**，已贴近原值 240s。这条耦合没有类型系统兜底，改由 `test_single_call_timeout_leaves_room_for_a_whole_task` 断言守住（变异测试：把任务超时改回 240 会挂）。
 
 上调后 600519 @ 2026-05-15 重跑：`llm_calls=12/16`、无截断、完整跑完一轮返工（5 条质询）。报告仍为「部分完成」，但原因已与预算无关——`macro`、`report` 各一次「结构与引用校验未通过」，`arbiter` 一次请求失败；把 `macro` 单独隔离复跑成功，属于该模型输出的偶发问题，系统按设计保留确定性结论并如实标注。136 项自动测试通过。
+
+## 逐日事实、除权归因与第二行情源（2026-09-24）
+
+起因：300308.SZ（中际旭创，截至 2026-09-23）的真实研究里六个角色合计抛出约 25 条待解问题。逐条核对后，成因分四类：已取到但没喂给模型、口径写死、真缺数据域、结构性拿不到。本轮处理前三类。
+
+**已取到但没喂给模型**：行情取数早就拿回完整 OHLCV，但下游只把收盘价送给模型。现 `analytics.daily_facts` 把逐日 OHLCV 压成确定性事实（区间高低点及日期、最大单日波动前 5 名含当日 OHLC、跳空日、零成交日、量比、价量相关），数值由 Python 算、模型只解读。实测 300308 的区间最大单日跌幅 **-15.69% 落在 2026-07-28**（O=1001.06 C=908.00 H=1018.00 L=899.99），此前报告只能说「存在大幅波动」而指不出是哪天。
+
+**除权归因**：A 股在同一 client 生命周期内取未复权主序列 + 同源前复权对照序列，两者只在公司行动生效日出现差异，相减即得当日实测影响。验证法：`002594` 除权日 2026-07-31 实测影响 0.372%，与公告「10 派 3.58 元」量级一致；`300308` 在 100 条窗口内无公司行动，最大单日波动 `action_effect_pct` 为 0.0 且 `nearest_ex_date` 为 null，即该跌幅与除权无关。畸形输入的三条降级路径都有用例守住：对照序列日期与主序列不一致时整份丢弃（否则「少了一天」会被误报成一次除权）、取不到对照序列时 `action_effect_pct` 为 `null` 而不是 0、公告缺一条时以复权序列显出那天并标 `announced: null`。
+
+**第二行情源**：新浪财经日线（A 股 JSON、美股 JSONP）与腾讯比对最近 10 个共同交易日的收盘价与成交量，相对容差 0.5%。实测收盘价完全一致、成交量差约 0.0002%，`300308`、`002594`、`AAPL` 均为 `consistent`。美股主序列是前复权、第二源是未复权，比对起点因此落在最近一次公司行动之后，避免两源口径差异被读成数据出错。`unavailable`（没去查）与 `consistent`（查了没问题）严格区分，两者都不与 `mismatch` 混同。
+
+**中国宏观**：从单一 10 年期国债收益率扩展为 7 项指标（国债收益率、CPI、PPI、M2、M1、存款准备金率、官方 PMI）。修掉一个口径 bug——原 note 写「取 {请求起点} 至 {截止日} 的观测」，但返回清单实际只覆盖最近 12 个月末，模型据此质疑「note 说的起点和清单对不上」。现 note 写实际覆盖区间与条数。发布滞后按指标设置（统计类 45 天、PMI 31 天），实测 `as_of=2026-09-23` 时 CPI/PPI/M2/M1/PMI 停在 2026-08 而收益率是当期，正是「当时可得」应有的形状。单指标失败只降级该指标，不整块失败。
+
+**未做的部分**：CN 成交额依赖会限流的公开接口，本版本不实现，报告中显式声明成交额不可得，不用 `volume × 均价` 估算。
+
+174 项自动测试通过。日线样本上限由 100 提高到 300，取数窗口随之放宽（确保 300 个交易日约 430 个自然日能取满），演示生成器窗口同步放宽；已加边界用例守住请求侧窗口宽度与 `outputsize=full` 的切换——上限提高而窗口没放宽时上游不会报错，只会静默少给。
+
+## 财务数据域与设计边界（2026-09-24）
+
+承接上节第四类「结构性拿不到」。基本面按用户拍板走**加数据不加角色**：新增确定性节点 `fundamentals`（东方财富数据中心 `RPT_F10_FINANCE_MAINFINADATA`，免密钥），写独立状态键、直接进证据池、报告标注 `kind: fundamental`，但**不进** `AGENT_SPECS` / 角色列表 / 计划字段，也不参与质询返工。
+
+**时点收口走公告日**。用例 `test_point_in_time_cutoff_uses_notice_date_not_report_date` 守住关键反例：2026 中报报告期末 6-30、公告日 8-22，截止 `2026-07-01` 时只能看到一季报。若按报告期末收口，等于用 8 月下旬才公开的数据解释 6-7 月行情。同一报告期被更正时取公告日更晚的一条；日期解析失败的记录整条丢弃而不是猜。
+
+**不估算**。上游 `null` 与 `"--"` 一律保留为未知（`test_missing_values_stay_none_instead_of_becoming_zero`），派生比率分母不可用时返回 `null` 而非 0（`test_derived_ratio_is_unknown_when_the_denominator_is_unusable`），一个报告期都取不到时抛 `ProviderError` 而不是返回空壳（`test_no_records_raises_instead_of_reporting_an_empty_shell`）。证据 note 写的是**清单实际覆盖**（首末期名称、最新一期关键数字、`NOTICE_DATE <= {截止日}`），不是请求窗口——这与上节宏观 note 的口径 bug 是同一类问题，本轮一并按「写实际覆盖」处理。
+
+**降级**：A 股节点取数失败转 `partial` + warning，整份报告照常产出（`test_fundamentals_failure_degrades_to_partial_not_fatal`）；美股节点返回 `skipped` 并写明需付费源（`test_us_run_declares_fundamentals_unavailable_without_failing_the_report`）。
+
+**设计边界分栏**：浮动/固定利率债务拆分、加权平均融资成本、分析师一致预期、股权风险溢价、折现率到估值的量化传导——免费公开源不提供，本系统不估算。这些以 `DESIGN_LIMITS` 注入各角色上下文，`render_markdown` 把命中关键词的 open_question 归入独立「设计边界（非数据缺口）」段。`test_design_limit_matching_does_not_swallow_real_questions`（参数化）确保匹配不会误吞真正需要补充的数据问题，`test_design_limits_are_rendered_apart_from_open_questions` 守住分栏渲染。
+
+**接线核对**：新数据域要进引用白名单必须同时改四处——`Evidence.kind` 的 Literal、`evidence_pool` 的遍历键、`coverage.fundamentals`、`limitations` 与 `witness` 判定，以及图上的 `manager → fundamentals` 边与四元汇合屏障。漏掉任一处，财务证据会被模型引用校验拒绝或从覆盖度里消失；`test_cn_run_carries_fundamentals_without_spending_a_role` 同时断言 `fundamentals` 已进证据池、且未混进角色名册与计划字段。
+
+193 项自动测试通过。

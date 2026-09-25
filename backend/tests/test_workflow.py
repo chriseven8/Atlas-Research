@@ -78,11 +78,63 @@ def arbiter_payload(eids):
     }
 
 
+# 财务接口的最小可用应答：两期报告，公告日都早于本文件统一的 as_of(2026-06-10)。
+FUNDAMENTAL_ROWS = [
+    {
+        "REPORT_DATE": "2026-03-31 00:00:00",
+        "REPORT_DATE_NAME": "2026一季报",
+        "REPORT_TYPE": "一季报",
+        "NOTICE_DATE": "2026-04-17 00:00:00",
+        "CURRENCY": "CNY",
+        "TOTALOPERATEREVE": 1.2e10,
+        "TOTALOPERATEREVETZ": 20.0,
+        "XSMLL": 40.0,
+        "XSJLL": 22.0,
+        "PARENTNETPROFIT": 2.6e9,
+        "PARENTNETPROFITTZ": 25.0,
+        "KCFJCXSYJLR": 2.5e9,
+        "KCFJCXSYJLRTZ": 24.0,
+        "ROEJQ": 6.5,
+        "ROEKCJQ": 6.2,
+        "NETCASH_OPERATE_PK": 3.0e9,
+        "TOTAL_ASSETS_PK": 9.0e10,
+        "LIABILITY": 4.0e10,
+        "TOTAL_EQUITY_PK": 5.0e10,
+        "ZCFZL": 44.4,
+        "INTEREST_COVERAGE_RATIO": 30.0,
+        "EPSJB": 1.1,
+        "BPS": 20.0,
+    },
+    {
+        "REPORT_DATE": "2025-12-31 00:00:00",
+        "REPORT_DATE_NAME": "2025年报",
+        "REPORT_TYPE": "年报",
+        "NOTICE_DATE": "2026-03-31 00:00:00",
+        "CURRENCY": "CNY",
+        "TOTALOPERATEREVE": 4.5e10,
+        "TOTALOPERATEREVETZ": 15.0,
+        "XSMLL": 39.0,
+        "XSJLL": 21.0,
+        "PARENTNETPROFIT": 9.4e9,
+        "PARENTNETPROFITTZ": 18.0,
+        "ROEJQ": 25.0,
+        "NETCASH_OPERATE_PK": 1.0e10,
+        "TOTAL_ASSETS_PK": 8.6e10,
+        "LIABILITY": 3.9e10,
+        "ZCFZL": 45.3,
+        "INTEREST_COVERAGE_RATIO": 28.0,
+    },
+]
+
+
 def role_transport(overrides=None, journal=None):
     """按 system prompt 识别角色并返回符合该角色 schema 的响应。
 
     overrides: 角色 key → (context, evidence_ids) -> payload
     journal:   若提供，按调用顺序追加角色 key，用于断言调用次数与顺序
+
+    财务数据域与模型调用共用同一个注入点（都是 httpx transport），所以这里也要认得出
+    财务接口那条 URL——否则本文件里所有 CN 用例都会因为「取数打到模型 mock」而失败。
     """
     overrides = overrides or {}
 
@@ -107,6 +159,11 @@ def role_transport(overrides=None, journal=None):
         return finding_payload(ids)
 
     def responder(request):
+        if "datacenter-web.eastmoney.com" in request.url.host:
+            return httpx.Response(
+                200,
+                json={"success": True, "result": {"count": len(FUNDAMENTAL_ROWS), "data": FUNDAMENTAL_ROWS}},
+            )
         body = json.loads(request.content)
         system = body["input"][0]["content"]
         for role, marker in ROLE_MARKERS.items():
@@ -593,3 +650,126 @@ def test_recovery_attempt_limit(repo, settings):
         )
     assert repo.claim() is None
     assert repo.get(job_id)["status"] == "failed"
+
+
+def test_cn_run_carries_fundamentals_without_spending_a_role(repo, settings):
+    """财务数据域取到了：进覆盖率、进证据、进证据池，但不占八个角色里的任何一个。"""
+    job_id, job = create_claim(repo, market="CN", symbol="600519", mode="live")
+    execute_job(repo, settings, job, CnProvider(), transport=role_transport())
+    result = repo.get(job_id)
+    report = result["report"]
+    assert report["coverage"]["fundamentals"] is True
+    fundamental = [e for e in report["evidence"] if e["kind"] == "fundamental"]
+    assert len(fundamental) == 1
+    assert "2026一季报" in fundamental[0]["title"]
+    # 财务数据域不是角色：八个角色的花名册原样不动，它既不在启用/停用清单里，
+    # 也不进 agent_findings——它只做确定性取数，不调用模型。
+    names = {a["name"] for a in result["agents"]}
+    assert set(AGENT_KEYS) <= names
+    assert "fundamentals" not in AGENT_KEYS
+    assert "fundamentals" not in report["plan"]["enabled_agents"]
+    assert "fundamentals" not in report["plan"]["skipped_reason"]
+    assert all(key in ROLE_MARKERS for key in report["agent_findings"])
+
+
+def test_us_run_declares_fundamentals_unavailable_without_failing_the_report(repo, settings):
+    """美股取不到财报是「按设计不提供」，不该把每份美股报告都拖成 partial。"""
+    job_id, job = create_claim(repo, market="US", symbol="AAPL")
+    execute_job(repo, settings, job)
+    result = repo.get(job_id)
+    assert result["status"] == "completed"
+    report = result["report"]
+    assert report["coverage"]["fundamentals"] is False
+    assert any("财务数据未启用" in x for x in report["limitations"])
+    assert not [e for e in report["evidence"] if e["kind"] == "fundamental"]
+
+
+def test_fundamentals_failure_degrades_to_partial_not_fatal(repo, settings):
+    def respond(req):
+        if "datacenter-web.eastmoney.com" in req.url.host:
+            return httpx.Response(200, json={"success": True, "result": {"count": 0, "data": []}})
+        raise AssertionError("本用例不该调用模型")
+
+    job_id, job = create_claim(repo, market="CN", symbol="600519", mode="live")
+    execute_job(repo, settings, job, CnProvider(), transport=httpx.MockTransport(respond))
+    result = repo.get(job_id)
+    assert result["status"] == "partial"
+    report = result["report"]
+    assert report["coverage"]["fundamentals"] is False
+    assert any("无可用报告期记录" in x for x in report["limitations"])
+    # 行情与新闻照常出报告：一个数据域掉线不该让整轮研究失败
+    assert report["news"]
+
+
+@pytest.mark.parametrize(
+    "question,matched",
+    [
+        ("需要补充浮动利率与固定利率债务的拆分", True),
+        ("缺少分析师一致预期，无法判断预期差", True),
+        ("无法量化折现率变动到目标价的传导", True),
+        ("需要 2026 年逐日成交量明细以核对量价配合", False),
+        ("缺少分部收入与毛利率拆解", False),
+    ],
+)
+def test_design_limit_matching_does_not_swallow_real_questions(question, matched):
+    from financial_research.workflow import design_limit_of
+
+    assert bool(design_limit_of(question)) is matched
+
+
+def test_design_limits_are_rendered_apart_from_open_questions(repo, settings):
+    """设计边界要从「待解问题」里分出去，但真实问题必须原样留下。"""
+    enable_llm(settings)
+    real = "缺少 2026 年逐日成交量明细以核对量价配合"
+    boundary = "需要补充浮动利率与固定利率债务的拆分"
+    transport = role_transport(
+        overrides={
+            "technical": lambda context, ids: {
+                **finding_payload(ids),
+                "open_questions": [real, boundary],
+            }
+        }
+    )
+    job_id, job = create_claim(repo, market="CN", symbol="600519", mode="live", use_llm=True)
+    execute_job(repo, settings, job, CnProvider(), transport=transport)
+    markdown = repo.get(job_id)["report"]["markdown"]
+    assert f"- 待解问题：{real}" in markdown
+    assert boundary not in markdown.split("## 设计边界（非数据缺口）")[0]
+    assert "## 设计边界（非数据缺口）" in markdown
+    assert "浮动/固定利率债务拆分" in markdown
+    # 未经匹配的原始文本仍留在 JSON 报告里，多角色可观测性不受渲染分流影响
+    findings = repo.get(job_id)["report"]["agent_findings"]
+    assert findings["technical"]["open_questions"] == [real, boundary]
+
+
+def test_user_facing_prose_carries_readable_citations_not_evidence_ids(repo, settings):
+    """market-3f2a… 这种标识只有程序认得，用户既读不懂也回指不到东西。
+
+    正文与引用一律换算成「来源 NN」，编号即「证据来源」小节的序号；原始 ID 只留在
+    「证据来源」小节与结构化字段里（引用校验靠后者，不能被渲染改写）。
+    """
+    enable_llm(settings)
+
+    def with_ids(context, ids):
+        eid = ids[0]
+        return {
+            "summary": f"覆盖范围见（{eid}），行情口径需结合证据理解。",
+            "claims": [{"text": f"价格与日期已完成校验（{eid}）。", "kind": "fact", "evidence_ids": [eid]}],
+            "uncertainties": [f"极端波动段未经第二源校准（{eid}）"],
+        }
+
+    transport = role_transport(overrides={"report": with_ids})
+    job_id, job = create_claim(repo, market="CN", symbol="600519", mode="live", use_llm=True)
+    execute_job(repo, settings, job, CnProvider(), transport=transport)
+    report = repo.get(job_id)["report"]
+    raw = report["ai_synthesis"]["claims"][0]["evidence_ids"][0]
+    number = f"{[ev['id'] for ev in report['evidence']].index(raw) + 1:02d}"
+    body, sources = report["markdown"].split("## 证据来源")
+    assert raw not in body
+    assert f"覆盖范围见（来源 {number}）" in body
+    assert f"价格与日期已完成校验（来源 {number}）" in body
+    assert f"极端波动段未经第二源校准（来源 {number}）" in body
+    # 「证据来源」小节保留原始 ID，编号才对得上正文里的「来源 NN」
+    assert f"- {number} · {raw} · " in sources
+    # 机器层不受渲染影响：结构化引用仍是原始 ID。
+    assert report["ai_synthesis"]["claims"][0]["evidence_ids"] == [raw]

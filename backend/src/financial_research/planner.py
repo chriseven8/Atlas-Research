@@ -36,12 +36,13 @@ def rule_plan(req: ResearchRequest, settings: Settings) -> dict:
         skipped.append(("news", "未配置美国新闻源（ALPHA_VANTAGE_API_KEY），本轮新闻证据不可用。"))
 
     if req.market == "CN":
-        # 中国 10 年期国债收益率走东方财富公开接口，无需密钥，因此 A 股宏观总能启用。
+        # 中国宏观走东方财富公开接口，无需密钥，因此 A 股宏观总能启用。
         enabled.append("macro")
         focus.append(
             (
                 "macro",
-                "说明 10 年期国债收益率这一长期无风险利率如何经折现率影响估值，并标注它不含货币政策与通胀预期。",
+                "结合国债收益率、CPI/PPI 同比、M2/M1 同比、存款准备金率与 PMI，"
+                "说明利率与信用环境如何经折现率与融资成本影响估值，并标注它不含货币政策立场与盈利预期。",
             )
         )
     elif settings.alpha_vantage_api_key:

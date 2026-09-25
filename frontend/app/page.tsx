@@ -20,6 +20,21 @@ const today = () => new Date().toLocaleDateString("sv-SE");
 const dateLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 const fmt = (n: number | null | undefined, digits = 2) => n == null ? "—" : n.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
+// 证据标识（market-3f2a…）是给程序用的：用户读不懂，也回指不到东西。正文与引用一律换成
+// 「来源 NN」——编号就是「来源」页里那条证据的序号，原始标识只在证据条目里保留（审计用）。
+function citeIndex(evidence: Evidence[]) {
+  return new Map(evidence.map((ev, i) => [ev.id, String(i + 1).padStart(2, "0")]));
+}
+function citeLabel(ids: string[], index: Map<string, string>) {
+  return ids.length ? "来源 " + ids.map(id => index.get(id) || id).join("、") : "未标注来源";
+}
+// 模型偶尔仍会把标识写进正文；引用白名单是程序算的，所以这里精确替换掉真实存在的那些。
+function readable(text: string, index: Map<string, string>) {
+  let out = text;
+  for (const [id, number] of index) out = out.split(id).join(`来源 ${number}`);
+  return out;
+}
+
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...options?.headers }, cache: "no-store" });
   const data = await res.json().catch(() => ({}));
@@ -66,29 +81,31 @@ function Collaboration({ report }: { report: Report }) {
   const plan = report.plan;
   const challenges = report.challenges || [];
   const arbitration = report.arbitration;
+  const cite = citeIndex(report.evidence);
+  const r = (text?: string) => readable(text || "", cite);
   if (!plan && !challenges.length && !arbitration) return null;
   return <section className="panel collab-panel">
     <div className="panel-head"><h3><Layers3 size={17} /> 多角色协作轨迹</h3><span className="tiny-label">PLAN · CHALLENGE · ARBITRATION</span></div>
     {plan && <div className="collab-block">
       <div className="collab-head"><h4>研究计划</h4><span className="collab-source">{report.planner || "规则规划器"}</span></div>
-      <p className="muted">{plan.rationale}</p>
+      <p className="muted">{r(plan.rationale)}</p>
       <div className="plan-row">
-        {(plan.enabled_agents || []).map(key => <span className="plan-chip on" key={key}>{AGENT_NAME[key] || key}{plan.focus?.[key] ? ` · ${plan.focus[key]}` : ""}</span>)}
-        {Object.entries(plan.skipped_reason || {}).map(([key, reason]) => <span className="plan-chip off" key={key} title={reason}>{AGENT_NAME[key] || key} · 未启用</span>)}
+        {(plan.enabled_agents || []).map(key => <span className="plan-chip on" key={key}>{AGENT_NAME[key] || key}{plan.focus?.[key] ? ` · ${r(plan.focus[key])}` : ""}</span>)}
+        {Object.entries(plan.skipped_reason || {}).map(([key, reason]) => <span className="plan-chip off" key={key} title={r(reason)}>{AGENT_NAME[key] || key} · 未启用</span>)}
       </div>
     </div>}
     {challenges.length > 0 && <div className="collab-block">
       <div className="collab-head"><h4>质询与返工</h4><span className="collab-source">{challenges.length} 项</span></div>
       {challenges.map((item, index) => <div className={`challenge-item ${item.resolved ? "resolved" : ""}`} key={index}>
         <div className="challenge-top"><span className="challenge-round">第 {item.round} 轮</span><strong>{AGENT_NAME[item.target_agent] || item.target_agent}</strong><span className={`challenge-state ${item.resolved ? "ok" : "open"}`}>{item.resolved ? "已返工" : item.accepted ? "未返工" : "不可返工"}</span></div>
-        <p>{item.reason}</p><p className="muted">要求：{item.request}</p>
+        <p>{r(item.reason)}</p><p className="muted">要求：{r(item.request)}</p>
       </div>)}
     </div>}
     {arbitration && arbitration.status !== "skipped" && <div className="collab-block">
       <div className="collab-head"><h4>仲裁结论</h4><span className="collab-source">首席仲裁</span></div>
-      <p><strong>冲突：</strong>{arbitration.conflict}</p>
-      <p><strong>裁决：</strong>{arbitration.ruling}</p>
-      <p className="muted">依据：{arbitration.rationale}</p>
+      <p><strong>冲突：</strong>{r(arbitration.conflict)}</p>
+      <p><strong>裁决：</strong>{r(arbitration.ruling)}</p>
+      <p className="muted">依据：{r(arbitration.rationale)}</p>
     </div>}
     {arbitration && arbitration.status === "skipped" && <p className="empty-inline">本轮未检测到结论冲突，首席仲裁未启用。</p>}
   </section>;
@@ -96,7 +113,7 @@ function Collaboration({ report }: { report: Report }) {
 
 function Sources({ evidence }: { evidence: Evidence[] }) {
   return <div className="sources">{evidence.map((ev, i) => <article className="source" key={ev.id} id={ev.id}>
-    <div className="source-number">{String(i + 1).padStart(2, "0")}</div><div className="source-body"><div className="source-meta"><span>{ev.source}</span><span>{ev.kind === "market" ? "行情" : ev.kind === "macro" ? "宏观" : "新闻"}</span>{ev.is_demo && <span className="demo-tag">合成演示</span>}</div>
+    <div className="source-number">{String(i + 1).padStart(2, "0")}</div><div className="source-body"><div className="source-meta"><span>{ev.source}</span><span>{ev.kind === "market" ? "行情" : ev.kind === "macro" ? "宏观" : ev.kind === "fundamental" ? "财务" : "新闻"}</span>{ev.is_demo && <span className="demo-tag">合成演示</span>}</div>
       <h3>{ev.title}</h3><p>{ev.note || "保留原始来源和采集时间，可通过快照标识追溯。"}</p><div className="source-foot">观测 / 发布时间 {ev.observed_at.slice(0, 19).replace("T", " ")} · 采集 {dateLabel(ev.retrieved_at)}</div>
       <details><summary>查看证据标识与快照校验值</summary><code>{ev.id}<br />SHA256 {ev.snapshot_hash}</code></details></div>
     {ev.url && /^https?:\/\//.test(ev.url) && <a className="icon-button" href={ev.url} target="_blank" rel="noreferrer" aria-label={`打开来源：${ev.title}`}><ArrowUpRight size={18} /></a>}
@@ -104,6 +121,8 @@ function Sources({ evidence }: { evidence: Evidence[] }) {
 }
 
 function ReportBody({ report, showSources }: { report: Report; showSources: () => void }) {
+  const cite = citeIndex(report.evidence);
+  const r = (text?: string) => readable(text || "", cite);
   return <>
     <div className={`data-notice ${report.mode === "demo" ? "" : "real"}`}><FlaskConical size={16} /><span>{report.mode === "demo" ? "演示报告 · 行情、新闻和宏观数据均为合成情景，不反映真实市场。" : "真实日线 · 供应商数据可能延迟；仅纳入已收盘数据，请关注价格口径和缺失项。"}</span></div>
     <div className="metric-grid">
@@ -113,12 +132,12 @@ function ReportBody({ report, showSources }: { report: Report; showSources: () =
       <div className="metric"><span>最大样本回撤</span><strong>{fmt(report.metrics.max_drawdown_pct)}<em>%</em></strong><small>样本收盘价峰谷跌幅</small></div>
     </div>
     <div className="analysis-grid"><section className="panel price-panel"><div className="panel-head"><h3><TrendingUp size={17} /> 价格与趋势</h3><div className="chart-legend"><i />收盘价 <i className="gold" />SMA20</div></div><PriceChart bars={report.chart} demo={report.mode === "demo"} currency={report.currency || "USD"} adjustment={report.adjustment || "raw"} /><div className="indicator-row"><span>趋势 <b>{report.metrics.trend}</b></span><span>RSI 14 <b>{fmt(report.metrics.rsi14)}</b></span><span>SMA 50 <b>{fmt(report.metrics.sma50)}</b></span></div></section>
-      <section className="panel insight-panel"><div className="panel-head"><h3><Compass size={17} /> 研究摘要</h3><span className="tiny-label">SYNTHESIS</span></div><p className="summary-text">{report.summary}</p><div className="summary-foot"><span><Layers3 size={14} /> {report.evidence.length} 项证据</span><button onClick={showSources}>查看来源 <ArrowUpRight size={14} /></button></div><div className="engine-label"><CheckCircle2 size={14} />{report.engine}</div></section></div>
+      <section className="panel insight-panel"><div className="panel-head"><h3><Compass size={17} /> 研究摘要</h3><span className="tiny-label">SYNTHESIS</span></div><p className="summary-text">{r(report.summary)}</p><div className="summary-foot"><span><Layers3 size={14} /> {report.evidence.length} 项证据</span><button onClick={showSources}>查看来源 <ArrowUpRight size={14} /></button></div><div className="engine-label"><CheckCircle2 size={14} />{report.engine}</div></section></div>
     <Collaboration report={report} />
-    <section className="panel narrative"><div className="panel-head"><h3><BookOpen size={17} /> 研究观察</h3><span className="tiny-label">EVIDENCE FIRST</span></div><div className="observations">{report.claims.map((c, i) => <div className="observation" key={i}><span className="obs-index">0{i + 1}</span><div><span className="claim-type">{c.kind === "fact" ? "数据观察" : "规则解释"}</span><p>{c.text}</p><button className="citation" onClick={showSources}>{c.evidence_ids.join(" · ")} <ArrowUpRight size={11} /></button></div></div>)}</div></section>
+    <section className="panel narrative"><div className="panel-head"><h3><BookOpen size={17} /> 研究观察</h3><span className="tiny-label">EVIDENCE FIRST</span></div><div className="observations">{report.claims.map((c, i) => <div className="observation" key={i}><span className="obs-index">0{i + 1}</span><div><span className="claim-type">{c.kind === "fact" ? "数据观察" : "规则解释"}</span><p>{r(c.text)}</p><button className="citation" onClick={showSources} title={c.evidence_ids.join(" · ")}>{citeLabel(c.evidence_ids, cite)} <ArrowUpRight size={11} /></button></div></div>)}</div></section>
     <div className="analysis-grid secondary"><section className="panel"><div className="panel-head"><h3><Globe2 size={17} /> 新闻与公告</h3><span className="count">{report.news.length}</span></div>{report.news.length ? report.news.map((item, i) => <article className="news-item" key={i}><div className="news-date">{item.published_at.slice(0, 10)} · {item.category === "announcement" ? "公司公告" : "新闻"} <span>{item.source}</span></div><h4>{item.title}</h4><p>{item.summary}</p>{item.url && /^https?:\/\//.test(item.url) && <a href={item.url} target="_blank" rel="noreferrer">阅读来源 <ArrowUpRight size={12} /></a>}</article>) : <p className="empty-inline">该区间没有可用新闻证据。详细原因见数据限制。</p>}</section>
       <div className="stack"><section className="panel macro-panel"><div className="panel-head"><h3><Activity size={17} /> 宏观背景</h3></div><p>{report.macro.summary}</p>{report.macro.interpretation && <p className="muted">{report.macro.interpretation}</p>}</section><section className="panel risk-panel"><div className="panel-head"><h3><ShieldCheck size={17} /> 风险与分歧</h3><span className="count amber">{report.risks.length}</span></div>{report.risks.map((r, i) => <div className={`risk-item ${r.level}`} key={i}><i /><div><h4>{r.title}</h4><p>{r.detail}</p></div></div>)}{report.conflicts.map((c, i) => <p className="conflict" key={i}>{c}</p>)}</section></div></div>
-    {report.ai_synthesis && <section className="panel ai-panel"><div className="panel-head"><h3><Sparkles size={17} /> AI 综合研判</h3><span className="tiny-label">需结合证据审阅</span></div><p>{report.ai_synthesis.summary}</p>{report.ai_synthesis.claims.map((c, i) => <div className="ai-claim" key={i}><p>{c.text}</p><button className="citation" onClick={showSources}>{c.evidence_ids.join(" · ")}</button></div>)}<ul>{report.ai_synthesis.uncertainties.map((x, i) => <li key={i}>{x}</li>)}</ul>{report.usage && <small>输入 {report.usage.input_tokens} / 输出 {report.usage.output_tokens} tokens · 估算费用 {report.usage.estimated_cost_usd == null ? "未配置单价" : `$${report.usage.estimated_cost_usd.toFixed(4)}`}</small>}</section>}
+    {report.ai_synthesis && <section className="panel ai-panel"><div className="panel-head"><h3><Sparkles size={17} /> AI 综合研判</h3><span className="tiny-label">需结合证据审阅</span></div><p>{r(report.ai_synthesis.summary)}</p>{report.ai_synthesis.claims.map((c, i) => <div className="ai-claim" key={i}><p>{r(c.text)}</p><button className="citation" onClick={showSources} title={c.evidence_ids.join(" · ")}>{citeLabel(c.evidence_ids, cite)}</button></div>)}<ul>{report.ai_synthesis.uncertainties.map((x, i) => <li key={i}>{r(x)}</li>)}</ul>{report.usage && <small>输入 {report.usage.input_tokens} / 输出 {report.usage.output_tokens} tokens · 估算费用 {report.usage.estimated_cost_usd == null ? "未配置单价" : `$${report.usage.estimated_cost_usd.toFixed(4)}`}</small>}</section>}
     <details className="limitations"><summary><CircleHelp size={15} /> 数据口径与研究限制 <span>{report.limitations.length} 项</span></summary><ul>{report.limitations.map((x, i) => <li key={i}>{x}</li>)}</ul><p>{report.metrics.methodology}</p></details>
   </>;
 }
@@ -198,7 +217,7 @@ export default function Home() {
       {view === "workspace" && <><div className="page-heading"><div><div className="eyebrow"><span /> RESEARCH, WITH PERSPECTIVE</div><h1>让每一个判断，都有据可循<span>。</span></h1><p>从市场数据到研究结论，八个研究角色为你梳理趋势、事件与风险，并留下计划、质询与仲裁的完整轨迹。</p></div><span className="heading-badge"><Layers3 size={16} /> 8 个协作角色</span></div>
       <div className="workspace-grid"><section className="panel request-panel"><div className="panel-head"><h2><Search size={17} /> 发起一项研究</h2><span className="tiny-label">01 / BRIEF</span></div><form onSubmit={submit}><label htmlFor="market">交易市场</label><select id="market" value={form.market || "US"} onChange={e => setForm({...form, market: e.target.value as "CN" | "US", symbol: e.target.value === "CN" ? "600519" : "AAPL", mode: "live"})}><option value="CN">A 股 · 沪深京 · CNY</option><option value="US">美股 · USD</option></select><label htmlFor="symbol">研究标的 <span>{form.market === "CN" ? "六位代码 / 交易所后缀" : "美股代码"}</span></label><div className="symbol-input"><Search size={17} /><input id="symbol" value={form.symbol} onChange={e => setForm({...form, symbol: e.target.value.toUpperCase()})} maxLength={12} required autoComplete="off" aria-describedby="symbol-hint" /><span>{form.market === "CN" ? "CNY" : "USD"}</span></div><div className="quick-symbols" id="symbol-hint">{(form.market === "CN" ? ["600519", "000001", "300750", "688981"] : ["AAPL", "MSFT", "NVDA", "SPY"]).map(s => <button key={s} type="button" className={form.symbol === s ? "active" : ""} onClick={() => setForm({...form, symbol: s})}>{s}</button>)}</div>
         <label htmlFor="question">你希望了解什么？</label><textarea id="question" rows={3} value={form.question} onChange={e => setForm({...form, question: e.target.value})} minLength={3} maxLength={1200} required />
-        <div className="form-row"><div><label htmlFor="as-of">数据截止日期</label><input id="as-of" type="date" value={form.as_of} min="2000-01-01" max={today()} required onChange={e => setForm({...form, as_of: e.target.value})} /></div><div><label htmlFor="lookback">日线样本</label><select id="lookback" value={form.lookback_days} onChange={e => setForm({...form, lookback_days: Number(e.target.value)})}><option value={30}>30 个交易日</option><option value={60}>60 个交易日</option><option value={90}>90 个交易日</option><option value={100}>100 个交易日</option></select></div></div>
+        <div className="form-row"><div><label htmlFor="as-of">数据截止日期</label><input id="as-of" type="date" value={form.as_of} min="2000-01-01" max={today()} required onChange={e => setForm({...form, as_of: e.target.value})} /></div><div><label htmlFor="lookback">日线样本</label><select id="lookback" value={form.lookback_days} onChange={e => setForm({...form, lookback_days: Number(e.target.value)})}><option value={30}>30 个交易日</option><option value={60}>60 个交易日</option><option value={90}>90 个交易日</option><option value={180}>180 个交易日</option><option value={300}>300 个交易日</option></select></div></div>
         <label>数据模式</label><div className="segmented"><button type="button" className={form.mode === "demo" ? "on" : ""} disabled={form.market === "CN"} title={form.market === "CN" ? "A 股使用真实行情；演示样例仅支持美股" : "合成演示"} onClick={() => setForm({...form, mode: "demo"})}><FlaskConical size={14} /> 合成演示</button><button type="button" className={form.mode === "live" ? "on" : ""} disabled={!config?.live_ready} title={!config?.live_ready ? "行情服务尚未就绪" : "使用真实数据"} onClick={() => setForm({...form, mode: "live"})}><Radio size={14} /> 真实数据</button></div>
         <label className={`ai-toggle ${!config?.llm_ready ? "disabled" : ""}`}><span><Sparkles size={15} /> AI 综合研判 <small>{config?.llm_ready ? "按需调用模型" : "配置模型后可开启"}</small></span><input type="checkbox" checked={form.use_llm} disabled={!config?.llm_ready} onChange={e => setForm({...form, use_llm: e.target.checked})} /></label>
         <button className="primary-button" type="submit" disabled={busy || !config || !form.as_of}>{busy ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}{busy ? "正在创建任务…" : "开始研究"}<ArrowRight size={16} /></button><p className="form-note">{form.mode === "demo" ? "无需 API 密钥 · 使用可复现的合成数据" : "无需行情密钥 · 已收盘日线 · 非逐笔实时"}</p></form></section>
@@ -212,7 +231,8 @@ export default function Home() {
         {icon: FlaskConical, name: "合成数据", badge: "开箱即用", ready: true, desc: "可复现的行情、虚构新闻与宏观情景。适合了解工作流与验证功能。", vars: "无需配置任何密钥"},
         {icon: Database, name: "腾讯财经真实行情", badge: "无需密钥", ready: true, desc: "A 股（沪深京）和美股已收盘日线。A 股未复权，美股前复权；公共接口可能延迟或存在历史覆盖缺口。", vars: "默认开启 · CN / US"},
         {icon: Globe2, name: "A 股新闻与公告", badge: "无需密钥", ready: true, desc: "东方财富个股新闻检索片段与公司公告索引，近 90 天有限结果，保留原始链接；不代表已阅读全文。", vars: "默认开启 · 新闻 / 公司公告"},
-        {icon: Globe2, name: "美国新闻与宏观（可选）", badge: config?.alpha_vantage_ready ? "已配置" : "待配置", ready: config?.alpha_vantage_ready, desc: "Alpha Vantage 提供美国新闻和利率背景。未配置时行情研究仍可运行，报告标记证据缺失。A 股新闻与公告使用免费公开接口；中国宏观尚未接入。", vars: "ALPHA_VANTAGE_API_KEY=你的密钥"},
+        {icon: Globe2, name: "A 股宏观与财务指标", badge: "无需密钥", ready: true, desc: "东方财富数据中心：10 年期国债收益率、CPI、PPI、M2、M1、存款准备金率、制造业 PMI，以及主要财务指标（营收、毛利率、归母净利、加权 ROE、经营现金流、资产负债率、利息保障倍数）。财务指标按公告日收口；美股财报不提供。", vars: "默认开启 · CN"},
+        {icon: Globe2, name: "美国新闻与宏观（可选）", badge: config?.alpha_vantage_ready ? "已配置" : "待配置", ready: config?.alpha_vantage_ready, desc: "Alpha Vantage 提供美国新闻和利率背景。未配置时行情研究仍可运行，报告标记证据缺失。A 股新闻、宏观与财务指标均使用免费公开接口，不占角色名额。", vars: "ALPHA_VANTAGE_API_KEY=你的密钥"},
         {icon: Sparkles, name: "AI 综合研判", badge: config?.llm_ready ? "已配置" : "可选连接", ready: config?.llm_ready, desc: "在确定性分析基础上，使用 Responses API 生成有引用的中文研判；多角色协作默认最多 12 次调用（可配置）。", vars: "OPENAI_API_KEY=你的密钥\nOPENAI_MODEL=账号可用的模型名称"},
       ].map(c => <section className="panel connection-card" key={c.name}><div className="connection-icon"><c.icon size={23} /></div><span className={`badge ${c.ready ? "completed" : "idle"}`}><span className="badge-dot" />{c.badge}</span><h2>{c.name}</h2><p>{c.desc}</p><pre>{c.vars}</pre></section>)}</div><section className="panel setup-guide"><h3>真实行情与可选增强</h3><ol><li>在项目根目录复制 <code>.env.example</code> 为 <code>.env</code>。</li><li>真实日线已默认开启。美国新闻与宏观可填写 Alpha Vantage 密钥；AI 研判另需模型密钥与名称。</li><li>重启后端并刷新页面，对应开关会自动启用。</li></ol><p>“已配置”只代表存在配置，不代表远程服务已验证。不要把密钥粘贴到研究问题中。</p></section></>}
       <footer className="page-footer"><span><Compass size={13} /> ATLAS RESEARCH</span><span>有依据的观察，可追溯的研究。</span><span>Local-first · v0.1.0</span></footer></main>

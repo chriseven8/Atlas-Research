@@ -16,7 +16,7 @@ class ResearchRequest(BaseModel):
     question: str = Field(default="分析近期价格趋势、新闻催化因素与主要风险。", min_length=3, max_length=1200)
     mode: Literal["demo", "live"] = "demo"
     as_of: date = Field(default_factory=date.today)
-    lookback_days: int = Field(default=90, ge=30, le=100)
+    lookback_days: int = Field(default=90, ge=30, le=300)
     use_llm: bool = False
 
     @field_validator("symbol", mode="before")
@@ -72,6 +72,9 @@ class Bar(BaseModel):
     low: float = Field(gt=0)
     close: float = Field(gt=0)
     volume: int = Field(ge=0)
+    # 成交额（计价货币，元/美元）。不是所有上游都给：A 股公共行情常只给成交量，
+    # 因此是可选的——缺了就如实标注为不可得，不用 成交量×均价 估算，那会把推断当观测写进证据。
+    amount: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def valid_ohlc(self):
@@ -87,7 +90,9 @@ class Evidence(BaseModel):
     url: str | None = None
     observed_at: str
     retrieved_at: str = Field(default_factory=utcnow)
-    kind: Literal["market", "news", "macro"]
+    # fundamental 是财务数据域（不是角色）：它由确定性节点取数，进证据池供引用，
+    # 但不对应 AGENT_SPECS 里的任何角色。
+    kind: Literal["market", "news", "macro", "fundamental"]
     is_demo: bool
     snapshot_hash: str
     note: str = ""

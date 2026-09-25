@@ -10,6 +10,8 @@ def test_api_end_to_end_and_downloads(repo, settings):
         config = client.get("/api/config").json()
         assert config["live_ready"] is True
         assert config["markets"] == ["CN", "US"]
+        # 前端据此渲染日线样本上限，后端校验与它必须同源，否则页面给出会被 422 拒绝的选项。
+        assert config["max_lookback_days"] == 300
         assert "api_key" not in str(config)
         response = client.post("/api/research", json={"symbol": "aapl", "as_of": "2026-06-10"})
         assert response.status_code == 202
@@ -51,6 +53,13 @@ def test_idempotency_and_request_validation(repo, settings):
             {"use_llm": True},
         ]:
             assert client.post("/api/research", json=invalid).status_code == 422
+
+
+def test_lookback_upper_bound_is_enforced_at_the_boundary(repo, settings):
+    with TestClient(create_app(settings, repo)) as client:
+        base = {"symbol": "AAPL", "as_of": "2026-06-10"}
+        assert client.post("/api/research", json={**base, "lookback_days": 300}).status_code == 202
+        assert client.post("/api/research", json={**base, "lookback_days": 301}).status_code == 422
 
 
 def test_cancel_pending_job(repo, settings):

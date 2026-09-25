@@ -6,6 +6,9 @@ from .agents import AgentSpec
 from .domain import AgentFinding, Arbitration, OutputTruncated, ProviderError, ResearchPlan, Synthesis
 from .settings import Settings
 
+# 一份 finding 允许的最大条数。超限即整份作废（不是截断），所以这是「别再往上加」的告警线。
+MAX_CLAIMS = 20
+
 
 def _extract_text(data: dict) -> str:
     """从 Responses 输出中取出正文，跳过推理模型产生的 reasoning 条目。"""
@@ -42,7 +45,10 @@ def validate_citations(result, allowed: set[str]) -> None:
     if isinstance(result, (AgentFinding, Synthesis)):
         claims = result.findings if isinstance(result, AgentFinding) else result.claims
         headline = result.headline if isinstance(result, AgentFinding) else result.summary
-        if not claims or len(claims) > 12 or not headline.strip():
+        # 上限是「防止一份输出塞爆报告」，不是内容质量门槛：超限即整份作废，
+        # 所以它必须留出余量——证据域变多后 300 条日线 + 7 项宏观 + 财务指标
+        # 足以让一个角色合理地写出十几条 finding，卡在 12 会静默吃掉整个角色。
+        if not claims or len(claims) > MAX_CLAIMS or not headline.strip():
             raise ValueError("empty or oversized findings")
         if any(
             not c.text.strip() or not c.evidence_ids or not set(c.evidence_ids) <= allowed for c in claims

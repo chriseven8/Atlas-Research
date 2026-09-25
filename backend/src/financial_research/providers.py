@@ -34,7 +34,9 @@ class DemoProvider:
     def market(self, req: ResearchRequest) -> dict:
         base = {"AAPL": 170, "MSFT": 350, "NVDA": 110, "SPY": 470}[req.symbol]
         phase = int(hashlib.sha256(req.symbol.encode()).hexdigest()[:4], 16) / 1000
-        dates = [req.as_of - timedelta(days=i) for i in range(220, -1, -1)]
+        # 460 个自然日约合 330 个工作日，够 lookback_days 上限（300）取到 300 条；
+        # 取的是序列末端的最近 N 条，放宽窗口不改变最近日期的取值。
+        dates = [req.as_of - timedelta(days=i) for i in range(460, -1, -1)]
         dates = [d for d in dates if d.weekday() < 5][-req.lookback_days :]
         bars = []
         for d in dates:
@@ -151,7 +153,9 @@ class AlphaVantageProvider:
         return data
 
     def market(self, req: ResearchRequest) -> dict:
-        data = self.fetch("TIME_SERIES_DAILY", symbol=req.symbol, outputsize="compact")
+        # compact 只回最近 100 个交易日；要更长区间必须用 full，否则长区间会被静默截断成 100 条。
+        outputsize = "full" if req.lookback_days > 100 else "compact"
+        data = self.fetch("TIME_SERIES_DAILY", symbol=req.symbol, outputsize=outputsize)
         series = data.get("Time Series (Daily)")
         if not isinstance(series, dict) or not series:
             raise ProviderError("未取得有效的日线行情。")
@@ -177,7 +181,7 @@ class AlphaVantageProvider:
             raise ProviderError("行情质量检查失败：存在非法价格、成交量或日期。") from None
         bars = bars[-req.lookback_days :]
         if len(bars) < 20:
-            raise ProviderError("截止日期前不足 20 条日线。当前接口只提供最近 100 个交易日，请选择近期日期。")
+            raise ProviderError("截止日期前不足 20 条日线，请检查标的上市时间与截止日期。")
         warnings = ["行情为未复权价格，分红和拆股可能扭曲收益率与技术指标；不提供总回报。"]
         if len(bars) < req.lookback_days:
             warnings.append(f"请求 {req.lookback_days} 条日线，实际可用 {len(bars)} 条。")
@@ -191,7 +195,7 @@ class AlphaVantageProvider:
             bars,
             False,
             url="https://www.alphavantage.co/documentation/#daily",
-            note="美国市场；USD；未复权；最新 100 条范围内筛选。",
+            note=f"美国市场；USD；未复权；Alpha Vantage {outputsize} 范围内筛选。",
         )
         return {
             "bars": bars,
